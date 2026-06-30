@@ -12,7 +12,8 @@ public class SchedulerTests
         double rtStop,
         string group,
         double quantity = 1e6,
-        double[]? fragments = null)
+        double[]? fragments = null,
+        double? predicted = null)
     {
         // Synthesise FragmentIon entries from the supplied mz array.
         // Intensities are assigned descending so the input order matches
@@ -32,6 +33,7 @@ public class SchedulerTests
             RtStop = rtStop,
             RtApex = (rtStart + rtStop) / 2.0,
             PrecursorQuantity = quantity,
+            PredictedPriority = predicted,
             QValue = 0.001,
             ProteinQValue = 0.001,
             Proteotypic = 1,
@@ -517,5 +519,33 @@ public class SchedulerTests
         });
 
         Assert.Equal(3, result.ScheduledIndices.Length);
+    }
+
+    [Fact]
+    public void Scheduler_PredictedRanking_OrdersPeptidesWithinProteinByScoreDescNullsLast()
+    {
+        // Three peptides in one protein at distinct, non-overlapping RTs. With
+        // Max = 1 only the top-priority peptide is covered. PredictedRanking
+        // must pick the highest predicted score; a null-scored peptide (no
+        // overlay match) sorts last and must never win.
+        var cands = new[]
+        {
+            Make("low", 500.0, 1.0, 1.4, "G1", predicted: 0.2),
+            Make("high", 600.0, 5.0, 5.4, "G1", predicted: 0.9),
+            Make("none", 700.0, 9.0, 9.4, "G1", predicted: null),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MinPeptidesPerProtein = 1,
+            MaxPeptidesPerProtein = 1,
+            PeptideRanking = PeptidePriority.PredictedRanking,
+            Objective = CoverageObjective.MaximizeProteins,
+        });
+
+        var scheduledIds = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToList();
+        Assert.Single(scheduledIds);
+        Assert.Equal("high", scheduledIds[0]);
     }
 }

@@ -131,6 +131,14 @@ public enum PeptidePriority
     PrecursorQuantity,
     /// <summary>DIA-NN <c>Q.Value</c> (peptide-precursor q-value, ascending).</summary>
     QValue,
+    /// <summary>
+    /// Predicted within-protein ranking (<see cref="Candidate.PredictedPriority"/>,
+    /// descending; candidates with no predicted score sort last). Sourced from a
+    /// Bromo <c>mean_pred_score</c> or Carafe <c>detectability_pred</c> overlay in
+    /// Carafe-only mode, where it auto-selects as the active peptide priority when
+    /// an overlay file is loaded.
+    /// </summary>
+    PredictedRanking,
 }
 
 public enum CoverageObjective

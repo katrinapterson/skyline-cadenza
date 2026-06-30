@@ -82,8 +82,8 @@ spectral library Carafe produces from a target protein list).
 - Quantity: NOT PROVIDED. Carafe predicts fragment relative intensity
   for each (peptide, charge), not a precursor or peptide abundance.
   See below for what Cadenza does with the
-  `PrecursorQuantity`-ranked path in Carafe-only mode and what's
-  planned.
+  `PrecursorQuantity`-ranked path in Carafe-only mode and how a
+  predicted-ranking overlay supplies a real within-protein order.
 - Parsimony: not in Carafe. Cadenza builds a peptide-to-proteins map
   from the Carafe `ProteinID` column (semicolon-separated
   UniProt-style `sp|ACC|NAME` ids are parsed to bare accessions) and
@@ -104,10 +104,11 @@ one peptide sum to a fixed constant: 100, or 1, depending on
 convention). There is no precursor abundance, no peptide-level
 quantity, and no across-peptide intensity calibration.
 
-The current code stuffs the sum of the top-N fragment relative
-intensities into the candidate's `PrecursorQuantity` field so that
-`PeptidePriority.PrecursorQuantity` has SOMETHING to sort on, but
-that sum carries no useful ranking information:
+When no predicted-ranking overlay is supplied, the code stuffs the
+sum of the top-N fragment relative intensities into the candidate's
+`PrecursorQuantity` field so that `PeptidePriority.PrecursorQuantity`
+has SOMETHING to sort on, but that sum carries no useful ranking
+information:
 
 - Within a single peptide, the relative intensities sum to the
   normalisation constant by construction. The top-N sum is
@@ -121,17 +122,43 @@ that sum carries no useful ranking information:
 - Between peptides, there's no quantitative signal at all because
   the per-spectrum normalisation wipes out the absolute scale.
 
-So in practice, peptide ranking on the Carafe path falls back on the
-unique-before-razor tier (which IS meaningful), and the
+So without an overlay, peptide ranking on the Carafe path falls back
+on the unique-before-razor tier (which IS meaningful), and the
 `PrecursorQuantity` tie-break inside each tier is effectively noise.
 
-What we CAN derive from Carafe but haven't implemented yet: a
-predicted RELATIVE peptide abundance WITHIN a protein. The model can
-compare the predicted spectra of two peptides from the same protein
-and estimate which is more likely to fly well and fragment cleanly,
-giving a real within-protein ranking. When that lands, it'll replace
-the stand-in for within-protein peptide ordering. It will NOT give
-cross-protein abundance.
+#### Predicted-ranking overlay (recommended)
+
+To get a real WITHIN-protein peptide ranking, supply a predicted
+peptide-ranking file alongside the Carafe library (UI: "Predicted
+peptide ranking"; `MainViewModel.PredictedRankingPath`). The overlay
+carries no fragments / m/z / RT, so it is not a candidate pool on its
+own; `PredictedRankingReader` reads it and
+`CandidateBuilder.BuildFromCarafe` matches each score onto the Carafe
+candidate pool by (peptide, charge), populating
+`Candidate.PredictedPriority`. When an overlay is loaded the
+peptide-ranking selector auto-switches to
+`PeptidePriority.PredictedRanking`, which orders peptides within each
+protein by that score, descending (candidates with no match sort last).
+
+Two interchangeable formats are auto-detected from the header:
+
+- **Bromo** `peptide_rankings.tsv`:
+  `protein, peptide (SEQ|charge), mean_pred_score, wins, rank`. The
+  score is `mean_pred_score` (higher = better). Peptides are
+  unmodified, so the match is on stripped sequence + charge.
+- **Carafe** `*_detectability_pred.tsv`:
+  `sequence, charge, ModifiedPeptide, detectability_pred, ...`. The
+  score is `detectability_pred` (higher = better). Matched on the
+  Carafe-form `ModifiedPeptide` + charge, with stripped sequence +
+  charge as a fallback. Carafe emits these in shards; multi-select the
+  shard files in the file dialog, point at the folder, or pick any one
+  `*_detectability_pred.tsv` in it (a lone file pulls in its folder
+  siblings). The reader merges every selected shard, keeping the higher
+  score on key collisions. Enter one path per line to mix files and
+  folders.
+
+This is a within-protein signal only. It does NOT give cross-protein
+abundance, so it does not feed protein ranking (see below).
 
 What we will never get from Carafe alone: absolute or relative
 abundance at the PROTEIN level (between proteins in the same sample).
@@ -139,13 +166,13 @@ There's no measurement to predict from.
 
 So when running in Carafe-only mode TODAY:
 
-- Peptide ranking with `PrecursorQuantity` (the default) selects on
-  the unique-before-razor tier and then orders randomly within each
-  tier. `QValue` ranking is no better (every candidate has
-  `QValue = 0.0`). Either is fine for now since the actual order
-  inside a tier doesn't carry signal; expect this to become
-  meaningful when the within-protein peptide-abundance prediction
-  is implemented.
+- Peptide ranking with `PredictedRanking` (auto-selected when an
+  overlay is loaded) orders peptides within each protein by the
+  predicted detectability / ranking score. This is the recommended
+  path. Without an overlay, `PrecursorQuantity` (the default) selects
+  on the unique-before-razor tier and then orders randomly within each
+  tier, and `QValue` ranking is no better (every candidate has
+  `QValue = 0.0`).
 - Protein ranking with `SummedIntensity` aggregates that same
   no-signal stand-in across a protein's peptides. With per-spectrum
   normalised intensities, the sum is approximately proportional to

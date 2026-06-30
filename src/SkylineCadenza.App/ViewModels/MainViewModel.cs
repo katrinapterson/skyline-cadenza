@@ -23,6 +23,33 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string? _reportPath;
     [ObservableProperty] private string? _carafeTsvPath;
 
+    /// <summary>
+    /// Optional predicted peptide-ranking overlay for Carafe-only mode: a Bromo
+    /// <c>peptide_rankings.tsv</c>, a Carafe <c>*_detectability_pred.tsv</c>, or a
+    /// folder of them. When set, peptide priority auto-switches to
+    /// <see cref="PeptidePriority.PredictedRanking"/> at load.
+    /// </summary>
+    [ObservableProperty] private string? _predictedRankingPath;
+
+    /// <summary>
+    /// Which file-based workflow the "Load + schedule" button runs: DIA-NN
+    /// report vs Carafe predicted library. Chosen explicitly rather than
+    /// inferred from which paths are populated.
+    /// </summary>
+    [ObservableProperty] private IngestWorkflow _workflow = IngestWorkflow.Diann;
+
+    /// <summary>
+    /// Synthesised peak half-width (seconds) used on the Carafe path, where the
+    /// predicted library carries only an apex. The candidate's unpadded peak is
+    /// <c>apex +/- this</c>; the scheduler then adds <see cref="FiringPadSec"/>
+    /// on top. Ignored on the DIA-NN path (real RT.Start/RT.Stop are used).
+    /// 6 s = the legacy 0.10 min default.
+    /// </summary>
+    [ObservableProperty] private double _peakHalfWidthSec = 6.0;
+
+    /// <summary>Convenience accessor: <see cref="PeakHalfWidthSec"/> in minutes.</summary>
+    public double PeakHalfWidthMin => PeakHalfWidthSec / 60.0;
+
     // Acquisition + load balancing
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SlotsLabel))]
@@ -117,6 +144,14 @@ public partial class MainViewModel : ObservableObject
     private Dictionary<string, IReadOnlyList<string>>? _geneToAccession;
     private HashSet<string>? _knownAccessions;
     private SkylineSession? _skylineSession;
+
+    // Cached Carafe-path inputs so the peak-half-width slider can rebuild
+    // candidates (RtStart/RtStop are baked in at build time) and reschedule
+    // live, without re-streaming the Carafe library. Null unless the active
+    // pool came from the Carafe workflow.
+    private List<CarafePrecursor>? _carafePrecursors;
+    private IReadOnlyDictionary<string, (string Group, string Type)>? _carafeParsimony;
+    private PredictedRankingReader.Result? _carafePredicted;
     private System.Threading.Timer? _skylinePoll;
     private int _skylinePollFailures;
     private CancellationTokenSource? _skylineLoadCts;
@@ -249,6 +284,31 @@ public partial class MainViewModel : ObservableObject
         if (dlg.ShowDialog() == true)
             CarafeTsvPath = dlg.FileName;
     }
+
+    [RelayCommand]
+    private void BrowsePredictedRanking()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "Predicted ranking (*.tsv)|*.tsv|All files (*.*)|*.*",
+            Title = "Select a Bromo peptide_rankings.tsv, or one or more Carafe *_detectability_pred.tsv",
+            Multiselect = true,
+        };
+        if (dlg.ShowDialog() == true)
+            PredictedRankingPath = string.Join(Environment.NewLine, dlg.FileNames);
+    }
+
+    /// <summary>
+    /// Split the predicted-ranking box into individual paths. Each non-blank
+    /// line is one file or folder; supports a single path, a folder, or several
+    /// multi-selected detectability shards.
+    /// </summary>
+    private static List<string> ParsePredictedRankingPaths(string? text) =>
+        string.IsNullOrWhiteSpace(text)
+            ? new List<string>()
+            : text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries
+                    | StringSplitOptions.TrimEntries)
+                .ToList();
 
     [RelayCommand]
     private void ExportThermoCsv()
@@ -850,9 +910,34 @@ public partial class MainViewModel : ObservableObject
         _geneToAccession = new Dictionary<string, IReadOnlyList<string>>();
         _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
 
-        _candidates = CandidateBuilder.BuildFromCarafe(carafePrecursors, parsimony);
+        // Optional predicted peptide-ranking overlay (Bromo / Carafe detectability).
+        // One or more files and/or folders, one per line in the input box.
+        PredictedRankingReader.Result? predicted = null;
+        var predictedPaths = ParsePredictedRankingPaths(PredictedRankingPath);
+        if (predictedPaths.Count > 0)
+        {
+            StatusMessage = predictedPaths.Count == 1
+                ? $"Reading predicted ranking {Path.GetFileName(predictedPaths[0])}..."
+                : $"Reading predicted ranking from {predictedPaths.Count} files...";
+            predicted = await Task.Run(() =>
+                PredictedRankingReader.LoadFromPaths(predictedPaths));
+        }
+
+        _candidates = CandidateBuilder.BuildFromCarafe(
+            carafePrecursors, parsimony, predicted: predicted);
+
+        string fragSourceLabel = "Carafe predicted fragments";
+        if (predicted is not null)
+        {
+            int matched = _candidates.Count(c => c.PredictedPriority is not null);
+            // Auto-select the predicted ranking as the active peptide priority.
+            PeptideRanking = PeptidePriority.PredictedRanking;
+            fragSourceLabel =
+                $"Carafe predicted fragments; predicted ranking matched {matched:n0}/{_candidates.Count:n0} precursors";
+        }
+
         await FinalizeLoadAsync(
-            fragSourceLabel: "Carafe predicted fragments",
+            fragSourceLabel: fragSourceLabel,
             sourceLabel: "Carafe library + target list");
     }
 

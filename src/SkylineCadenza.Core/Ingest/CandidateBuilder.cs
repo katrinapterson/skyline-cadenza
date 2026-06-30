@@ -1,3 +1,5 @@
+#nullable enable
+
 using SkylineCadenza.Core.Parsimony;
 using SkylineCadenza.Core.Scheduling;
 
@@ -69,10 +71,17 @@ public static class CandidateBuilder
     /// <c>TrRecalibrated</c> by <paramref name="peakHalfWidthMin"/> on each
     /// side (the SCHEDULER then layers its 30/15 s firing pad on top).
     /// </summary>
+    /// <param name="predicted">
+    /// Optional predicted-ranking overlay (Bromo / Carafe detectability). When
+    /// supplied, each candidate's <see cref="Candidate.PredictedPriority"/> is
+    /// resolved by (peptide, charge) so the scheduler can order peptides within
+    /// a protein with <see cref="PeptidePriority.PredictedRanking"/>.
+    /// </param>
     public static List<Candidate> BuildFromCarafe(
         IEnumerable<CarafePrecursor> precursors,
         IReadOnlyDictionary<string, (string Group, string Type)> parsimony,
-        double peakHalfWidthMin = 0.10)
+        double peakHalfWidthMin = 0.10,
+        PredictedRankingReader.Result? predicted = null)
     {
         var candidates = new List<Candidate>();
         foreach (var p in precursors)
@@ -91,6 +100,8 @@ public static class CandidateBuilder
                 RtStop = p.TrRecalibrated + peakHalfWidthMin,
                 RtApex = p.TrRecalibrated,
                 PrecursorQuantity = p.PredictedIntensity,
+                PredictedPriority = predicted?.Lookup(
+                    p.ModifiedPeptide, p.StrippedPeptide, p.PrecursorCharge),
                 QValue = 0.0,
                 ProteinQValue = double.NaN,
                 Proteotypic = p.ProteinAccessions.Length == 1 ? 1 : 0,

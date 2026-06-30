@@ -97,6 +97,7 @@ public static class Program
             RtStop = dto.RtStop,
             RtApex = dto.RtApex,
             PrecursorQuantity = dto.PrecursorQuantity,
+            PredictedPriority = dto.PredictedPriority,
             QValue = dto.QValue,
             ProteinQValue = dto.ProteinQValue,
             Proteotypic = dto.Proteotypic,
@@ -201,6 +202,7 @@ internal sealed class CandidateDto
     public double RtStop { get; set; }
     public double RtApex { get; set; }
     public double PrecursorQuantity { get; set; }
+    public double? PredictedPriority { get; set; }
     public double QValue { get; set; }
     public double ProteinQValue { get; set; } = double.NaN;
     public int Proteotypic { get; set; }

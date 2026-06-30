@@ -32,6 +32,15 @@ public sealed class Candidate
 
     public required double PrecursorQuantity { get; init; }
 
+    /// <summary>
+    /// Predicted within-protein priority (higher = better). Populated from a
+    /// predicted-ranking overlay (Bromo <c>mean_pred_score</c> or Carafe
+    /// <c>detectability_pred</c>) in Carafe-only mode. Null when no overlay was
+    /// supplied. Consumed only by <see cref="PeptidePriority.PredictedRanking"/>
+    /// for ordering peptides within a protein; it is NOT a cross-protein signal.
+    /// </summary>
+    public double? PredictedPriority { get; init; }
+
     /// <summary>Peptide-precursor q-value (DIA-NN <c>Q.Value</c>).</summary>
     public required double QValue { get; init; }
 

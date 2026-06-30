@@ -339,6 +339,9 @@ public static class Scheduler
                 return parameters.PeptideRanking switch
                 {
                     PeptidePriority.QValue => cx.QValue.CompareTo(cy.QValue),
+                    PeptidePriority.PredictedRanking =>
+                        (cy.PredictedPriority ?? double.NegativeInfinity)
+                            .CompareTo(cx.PredictedPriority ?? double.NegativeInfinity),
                     _ => cy.PrecursorQuantity.CompareTo(cx.PrecursorQuantity),
                 };
             });

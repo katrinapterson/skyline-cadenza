@@ -39,6 +39,15 @@
                     <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
                     <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
                 </DockPanel>
+                <TextBlock Text="Predicted peptide ranking (optional)" Margin="0,8,0,0"
+                           ToolTip="Carafe-only mode. A Bromo peptide_rankings.tsv, or one or more Carafe *_detectability_pred.tsv files (multi-select), or a folder of them - one path per line. Sets within-protein peptide priority; auto-selects the Predicted ranking option at load."/>
+                <DockPanel LastChildFill="True">
+                    <Button DockPanel.Dock="Right" Content="..." Width="32" VerticalAlignment="Top" Command="{Binding BrowsePredictedRankingCommand}" Margin="4,0,0,0"/>
+                    <TextBox Text="{Binding PredictedRankingPath, UpdateSourceTrigger=PropertyChanged}"
+                             AcceptsReturn="True" TextWrapping="NoWrap"
+                             VerticalScrollBarVisibility="Auto" MaxHeight="64"
+                             ToolTip="One file or folder per line. Multi-select in the file dialog to add several detectability shards."/>
+                </DockPanel>
                 <Button Content="Load + schedule" Command="{Binding LoadCommand}" Margin="0,8,0,4"/>
                 <DockPanel LastChildFill="True" Margin="0,0,0,4">
                     <Button DockPanel.Dock="Right" Content="Cancel" Width="64"
@@ -136,6 +145,7 @@
                 <ComboBox SelectedItem="{Binding PeptideRanking}">
                     <sched:PeptidePriority>PrecursorQuantity</sched:PeptidePriority>
                     <sched:PeptidePriority>QValue</sched:PeptidePriority>
+                    <sched:PeptidePriority>PredictedRanking</sched:PeptidePriority>
                 </ComboBox>
 
                 <!-- Library filter -->
