@@ -39,15 +39,24 @@
                     <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
                     <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
                 </DockPanel>
-                <TextBlock Text="Predicted peptide ranking (optional)" Margin="0,8,0,0"
-                           ToolTip="Carafe-only mode. A Bromo peptide_rankings.tsv, or one or more Carafe *_detectability_pred.tsv files (multi-select), or a folder of them - one path per line. Sets within-protein peptide priority; auto-selects the Predicted ranking option at load."/>
+                <TextBlock Text="Bromo peptide ranking (optional)" Margin="0,8,0,0"
+                           ToolTip="Carafe-only mode. A single Bromo peptide_rankings.tsv. Sets within-protein peptide priority; auto-selects the Predicted ranking option at load. (Carafe detectability predictions go in the field below.)"/>
                 <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Content="..." Width="32" VerticalAlignment="Top" Command="{Binding BrowsePredictedRankingCommand}" Margin="4,0,0,0"/>
-                    <TextBox Text="{Binding PredictedRankingPath, UpdateSourceTrigger=PropertyChanged}"
+                    <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowsePredictedRankingCommand}" Margin="4,0,0,0"/>
+                    <TextBox Text="{Binding PredictedRankingPath, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <TextBlock Text="Carafe detectability predictions (optional)" Margin="0,8,0,0"
+                           ToolTip="One or more Carafe *_detectability_pred.tsv files (multi-select), or a folder - one path per line. Used only for the detectability cutoff below (separate from the ranking overlay above), so you can rank with Bromo and filter with Carafe detectability."/>
+                <DockPanel LastChildFill="True">
+                    <Button DockPanel.Dock="Right" Content="..." Width="32" VerticalAlignment="Top" Command="{Binding BrowseDetectabilityCommand}" Margin="4,0,0,0"/>
+                    <TextBox Text="{Binding DetectabilityPath, UpdateSourceTrigger=PropertyChanged}"
                              AcceptsReturn="True" TextWrapping="NoWrap"
                              VerticalScrollBarVisibility="Auto" MaxHeight="64"
                              ToolTip="One file or folder per line. Multi-select in the file dialog to add several detectability shards."/>
                 </DockPanel>
+                <TextBlock Text="{Binding DetectabilityCutoff, StringFormat='Detectability cutoff: {0:0.00}'}" Margin="0,8,0,0"
+                           ToolTip="Drops candidates whose Carafe detectability is below this. Needs a detectability predictions file above; precursors with no prediction are kept. ~0.5 removes peptides ~90% unlikely to be observed while keeping most real detections."/>
+                <Slider Minimum="0" Maximum="1" TickFrequency="0.05" IsSnapToTickEnabled="True" Value="{Binding DetectabilityCutoff}"/>
                 <TextBlock Text="{Binding PeakHalfWidthSec, StringFormat='Predicted peak half-width (Carafe): {0:0} s'}" Margin="0,8,0,0"
                            ToolTip="Half-width of the synthesised peak on the Carafe path (apex +/- this), since the predicted library carries only an apex. The RT buffer below is added on top. Ignored for the DIA-NN workflow (real RT.Start/RT.Stop are used)."/>
                 <Slider Minimum="2" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeakHalfWidthSec}"/>

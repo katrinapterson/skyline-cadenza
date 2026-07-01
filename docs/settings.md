@@ -98,7 +98,24 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
   (kept unrenamed for now to avoid churning the public Core API; the
   UI label and docs use "time padding").
 
-### Predicted peak half-width (sec, Carafe workflow only)
+### Carafe detectability predictions + cutoff (Carafe path only)
+
+- **Detectability predictions**: one or more Carafe `*_detectability_pred.tsv`
+  files (multi-select) or a folder, entered separately from the predicted
+  peptide-ranking overlay. This lets you rank with one source (e.g. Bromo) and
+  filter with Carafe detectability at the same time. Parsed by
+  `PredictedRankingReader` (same reader as the ranking overlay).
+- **Detectability cutoff** (default **0.5**): precursors whose looked-up Carafe
+  detectability is below this are dropped from the candidate pool before
+  scheduling. Precursors with no prediction are kept (unknown is not filtered).
+  Applied only when a detectability file is supplied. Empirically ~0.5 removes
+  peptides that are ~90% unlikely to be observed while retaining ~87% of real
+  detections; raise toward 0.9 for high-confidence-only targets (at the cost of
+  recall). Wired to `CandidateBuilder.BuildFromCarafe(..., detectability,
+  minDetectability)`; moving the slider rebuilds the Carafe pool and reschedules
+  live.
+
+### Predicted peak half-width (sec, Carafe path only)
 
 - Default: 6.0 s (0.10 min).
 - Half-width of the synthesised peak on the Carafe path, where the

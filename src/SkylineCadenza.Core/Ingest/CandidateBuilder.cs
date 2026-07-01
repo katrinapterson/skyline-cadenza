@@ -77,17 +77,37 @@ public static class CandidateBuilder
     /// resolved by (peptide, charge) so the scheduler can order peptides within
     /// a protein with <see cref="PeptidePriority.PredictedRanking"/>.
     /// </param>
+    /// <param name="detectability">
+    /// Optional Carafe detectability overlay used as a candidate FILTER
+    /// (independent of <paramref name="predicted"/>). When supplied, precursors
+    /// whose looked-up detectability is below <paramref name="minDetectability"/>
+    /// are dropped. Precursors with no detectability entry are kept (unknown is
+    /// not filtered).
+    /// </param>
+    /// <param name="minDetectability">
+    /// Detectability cutoff applied only when <paramref name="detectability"/>
+    /// is supplied. Empirically ~0.5 removes peptides that are ~90% unlikely to
+    /// be observed while retaining most real detections.
+    /// </param>
     public static List<Candidate> BuildFromCarafe(
         IEnumerable<CarafePrecursor> precursors,
         IReadOnlyDictionary<string, (string Group, string Type)> parsimony,
         double peakHalfWidthMin = 0.10,
-        PredictedRankingReader.Result? predicted = null)
+        PredictedRankingReader.Result? predicted = null,
+        PredictedRankingReader.Result? detectability = null,
+        double minDetectability = 0.0)
     {
+        bool filterDet = detectability is not null && minDetectability > 0.0;
         var candidates = new List<Candidate>();
         foreach (var p in precursors)
         {
             if (!parsimony.TryGetValue(p.StrippedPeptide, out var assignment))
                 continue;
+            if (filterDet)
+            {
+                double? dv = detectability!.Lookup(p.ModifiedPeptide, p.StrippedPeptide, p.PrecursorCharge);
+                if (dv.HasValue && dv.Value < minDetectability) continue; // unknown (null) is kept
+            }
             string precursorId = $"{p.StrippedPeptide}+{p.PrecursorCharge}";
             candidates.Add(new Candidate
             {

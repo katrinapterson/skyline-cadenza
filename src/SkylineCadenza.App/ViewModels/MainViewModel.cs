@@ -24,19 +24,12 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string? _carafeTsvPath;
 
     /// <summary>
-    /// Optional predicted peptide-ranking overlay for Carafe-only mode: a Bromo
-    /// <c>peptide_rankings.tsv</c>, a Carafe <c>*_detectability_pred.tsv</c>, or a
-    /// folder of them. When set, peptide priority auto-switches to
-    /// <see cref="PeptidePriority.PredictedRanking"/> at load.
+    /// Optional Bromo peptide-ranking overlay for Carafe-only mode: a single
+    /// Bromo <c>peptide_rankings.tsv</c>. When set, peptide priority
+    /// auto-switches to <see cref="PeptidePriority.PredictedRanking"/> at load.
+    /// (Carafe detectability predictions go in <see cref="DetectabilityPath"/>.)
     /// </summary>
     [ObservableProperty] private string? _predictedRankingPath;
-
-    /// <summary>
-    /// Which file-based workflow the "Load + schedule" button runs: DIA-NN
-    /// report vs Carafe predicted library. Chosen explicitly rather than
-    /// inferred from which paths are populated.
-    /// </summary>
-    [ObservableProperty] private IngestWorkflow _workflow = IngestWorkflow.Diann;
 
     /// <summary>
     /// Synthesised peak half-width (seconds) used on the Carafe path, where the
@@ -49,6 +42,22 @@ public partial class MainViewModel : ObservableObject
 
     /// <summary>Convenience accessor: <see cref="PeakHalfWidthSec"/> in minutes.</summary>
     public double PeakHalfWidthMin => PeakHalfWidthSec / 60.0;
+
+    /// <summary>
+    /// Optional Carafe detectability prediction files (one or more
+    /// <c>*_detectability_pred.tsv</c>, or a folder) used as a candidate FILTER
+    /// on the Carafe path - separate from the ranking overlay above, so the user
+    /// can rank with Bromo and filter with Carafe detectability at the same time.
+    /// </summary>
+    [ObservableProperty] private string? _detectabilityPath;
+
+    /// <summary>
+    /// Minimum Carafe detectability a precursor must have to be kept (Carafe
+    /// path). Applied only when <see cref="DetectabilityPath"/> is set;
+    /// precursors with no prediction are kept. Default 0.5 (empirically drops
+    /// peptides ~90% unlikely to be observed while retaining most detections).
+    /// </summary>
+    [ObservableProperty] private double _detectabilityCutoff = 0.5;
 
     // Acquisition + load balancing
     [ObservableProperty]
@@ -152,6 +161,7 @@ public partial class MainViewModel : ObservableObject
     private List<CarafePrecursor>? _carafePrecursors;
     private IReadOnlyDictionary<string, (string Group, string Type)>? _carafeParsimony;
     private PredictedRankingReader.Result? _carafePredicted;
+    private PredictedRankingReader.Result? _carafeDetectability;
     private System.Threading.Timer? _skylinePoll;
     private int _skylinePollFailures;
     private CancellationTokenSource? _skylineLoadCts;
@@ -290,12 +300,24 @@ public partial class MainViewModel : ObservableObject
     {
         var dlg = new OpenFileDialog
         {
-            Filter = "Predicted ranking (*.tsv)|*.tsv|All files (*.*)|*.*",
-            Title = "Select a Bromo peptide_rankings.tsv, or one or more Carafe *_detectability_pred.tsv",
+            Filter = "Bromo peptide ranking (*.tsv)|*.tsv|All files (*.*)|*.*",
+            Title = "Select a Bromo peptide_rankings.tsv",
+        };
+        if (dlg.ShowDialog() == true)
+            PredictedRankingPath = dlg.FileName;
+    }
+
+    [RelayCommand]
+    private void BrowseDetectability()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "Carafe detectability (*.tsv)|*.tsv|All files (*.*)|*.*",
+            Title = "Select one or more Carafe *_detectability_pred.tsv files",
             Multiselect = true,
         };
         if (dlg.ShowDialog() == true)
-            PredictedRankingPath = string.Join(Environment.NewLine, dlg.FileNames);
+            DetectabilityPath = string.Join(Environment.NewLine, dlg.FileNames);
     }
 
     /// <summary>
@@ -638,7 +660,7 @@ public partial class MainViewModel : ObservableObject
             }
 
             _candidates = loadResult.Candidates;
-            _carafePrecursors = null; // Skyline pool uses BLIB / measured peak widths
+            _carafePrecursors = null; _carafeDetectability = null; // Skyline pool uses BLIB / measured peak widths
             _knownAccessions = _candidates.Select(c => c.ProteinGroup).ToHashSet();
             _geneToAccession = new Dictionary<string, IReadOnlyList<string>>();
 
@@ -879,7 +901,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         _candidates = CandidateBuilder.Build(rows, parsimony, frags);
-        _carafePrecursors = null; // DIA-NN pool uses measured peak widths
+        _carafePrecursors = null; _carafeDetectability = null; // DIA-NN pool uses measured peak widths
         await FinalizeLoadAsync(
             fragSourceLabel: frags.Count > 0 ? "Carafe library" : "DIA-NN report fragments",
             sourceLabel: "DIA-NN report");
@@ -915,38 +937,70 @@ public partial class MainViewModel : ObservableObject
         // Optional predicted peptide-ranking overlay (Bromo / Carafe detectability).
         // One or more files and/or folders, one per line in the input box.
         PredictedRankingReader.Result? predicted = null;
-        var predictedPaths = ParsePredictedRankingPaths(PredictedRankingPath);
-        if (predictedPaths.Count > 0)
+        if (!string.IsNullOrWhiteSpace(PredictedRankingPath))
         {
-            StatusMessage = predictedPaths.Count == 1
-                ? $"Reading predicted ranking {Path.GetFileName(predictedPaths[0])}..."
-                : $"Reading predicted ranking from {predictedPaths.Count} files...";
+            StatusMessage = $"Reading Bromo ranking {Path.GetFileName(PredictedRankingPath)}...";
             predicted = await Task.Run(() =>
-                PredictedRankingReader.LoadFromPaths(predictedPaths));
+                PredictedRankingReader.LoadFromPath(PredictedRankingPath!));
         }
 
-        // Cache the raw inputs so the peak-half-width slider can rebuild
-        // candidates + reschedule live without re-streaming the library.
+        // Optional Carafe detectability filter overlay (separate input).
+        PredictedRankingReader.Result? detectability = null;
+        var detPaths = ParsePredictedRankingPaths(DetectabilityPath);
+        if (detPaths.Count > 0)
+        {
+            StatusMessage = detPaths.Count == 1
+                ? $"Reading detectability {Path.GetFileName(detPaths[0])}..."
+                : $"Reading detectability from {detPaths.Count} files...";
+            detectability = await Task.Run(() => PredictedRankingReader.LoadFromPaths(detPaths));
+        }
+
+        // Cache the raw inputs so the peak-half-width and detectability-cutoff
+        // sliders can rebuild candidates + reschedule live without re-streaming.
         _carafePrecursors = carafePrecursors;
         _carafeParsimony = parsimony;
         _carafePredicted = predicted;
+        _carafeDetectability = detectability;
 
-        _candidates = CandidateBuilder.BuildFromCarafe(
-            carafePrecursors, parsimony, PeakHalfWidthMin, predicted);
+        RebuildCarafeCandidates();
 
         string fragSourceLabel = $"Carafe predicted fragments; peak half-width {PeakHalfWidthSec:0} s";
         if (predicted is not null)
         {
-            int matched = _candidates.Count(c => c.PredictedPriority is not null);
-            // Auto-select the predicted ranking as the active peptide priority.
-            PeptideRanking = PeptidePriority.PredictedRanking;
-            fragSourceLabel =
-                $"Carafe predicted fragments; predicted ranking matched {matched:n0}/{_candidates.Count:n0} precursors";
+            int matched = _candidates!.Count(c => c.PredictedPriority is not null);
+            PeptideRanking = PeptidePriority.PredictedRanking; // auto-select predicted ranking
+            fragSourceLabel = $"predicted ranking matched {matched:n0}/{_candidates!.Count:n0}";
         }
+        if (detectability is not null)
+            fragSourceLabel += $"; detectability >= {DetectabilityCutoff:0.00} ({_candidates!.Count:n0} precursors kept)";
 
         await FinalizeLoadAsync(
             fragSourceLabel: fragSourceLabel,
             sourceLabel: "Carafe library + target list");
+    }
+
+    /// <summary>
+    /// Rebuild the Carafe candidate pool from the cached precursors using the
+    /// current peak-half-width, predicted-ranking overlay, and detectability
+    /// filter. Cheap (no library re-stream); used at load and by the sliders.
+    /// </summary>
+    private void RebuildCarafeCandidates()
+    {
+        if (_carafePrecursors is null || _carafeParsimony is null) return;
+        _candidates = CandidateBuilder.BuildFromCarafe(
+            _carafePrecursors, _carafeParsimony, PeakHalfWidthMin,
+            _carafePredicted, _carafeDetectability, DetectabilityCutoff);
+    }
+
+    /// <summary>Rebuild the Carafe pool and refresh stats + schedule (slider path).</summary>
+    private async Task RefreshCarafeAsync()
+    {
+        if (_carafePrecursors is null) return;
+        RebuildCarafeCandidates();
+        LibraryPrecursors = _candidates!.Count;
+        LibraryPeptides = _candidates.Select(c => c.StrippedSequence).Distinct().Count();
+        LibraryProteinGroups = _candidates.Select(c => c.ProteinGroup).Distinct().Count();
+        await RescheduleAsync();
     }
 
     private async Task FinalizeLoadAsync(string fragSourceLabel, string sourceLabel)
@@ -1105,18 +1159,17 @@ public partial class MainViewModel : ObservableObject
     partial void OnCycleBudgetChanged(int value) => _ = RescheduleAsync();
     partial void OnFiringPadSecChanged(double value) => _ = RescheduleAsync();
 
-    // Peak half-width is baked into each candidate's RtStart/RtStop at build
-    // time, so it only affects the Carafe pool and requires rebuilding
-    // candidates (not just rescheduling). Rebuild from the cached precursors
-    // and reschedule; no-op for DIA-NN / Skyline pools (cache is null).
+    // Peak half-width (baked into RtStart/RtStop) and the detectability cutoff
+    // (a candidate filter) both change the Carafe pool at build time, so they
+    // rebuild candidates from the cached precursors rather than just
+    // rescheduling. No-op for DIA-NN / Skyline pools (cache is null).
     partial void OnPeakHalfWidthSecChanged(double value)
     {
         OnPropertyChanged(nameof(PeakHalfWidthMin));
-        if (_carafePrecursors is null || _carafeParsimony is null) return;
-        _candidates = CandidateBuilder.BuildFromCarafe(
-            _carafePrecursors, _carafeParsimony, PeakHalfWidthMin, _carafePredicted);
-        _ = RescheduleAsync();
+        _ = RefreshCarafeAsync();
     }
+
+    partial void OnDetectabilityCutoffChanged(double value) => _ = RefreshCarafeAsync();
 
     partial void OnPrmIsolationWidthThChanged(double value) => _ = RescheduleAsync();
     partial void OnChargeHandlingChanged(ChargeHandling value) => _ = RescheduleAsync();
