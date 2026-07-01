@@ -78,11 +78,12 @@ public static class CandidateBuilder
     /// a protein with <see cref="PeptidePriority.PredictedRanking"/>.
     /// </param>
     /// <param name="detectability">
-    /// Optional Carafe detectability overlay used as a candidate FILTER
-    /// (independent of <paramref name="predicted"/>). When supplied, precursors
-    /// whose looked-up detectability is below <paramref name="minDetectability"/>
-    /// are dropped. Precursors with no detectability entry are kept (unknown is
-    /// not filtered).
+    /// Optional Carafe detectability overlay. Used as a candidate FILTER
+    /// (precursors below <paramref name="minDetectability"/> are dropped;
+    /// unknown is kept) AND as the within-protein ranking fallback: when no
+    /// <paramref name="predicted"/> (Bromo) overlay is supplied, detectability
+    /// populates <see cref="Candidate.PredictedPriority"/> so the scheduler can
+    /// order peptides by detectability instead of the PrecursorQuantity stand-in.
     /// </param>
     /// <param name="minDetectability">
     /// Detectability cutoff applied only when <paramref name="detectability"/>
@@ -120,8 +121,12 @@ public static class CandidateBuilder
                 RtStop = p.TrRecalibrated + peakHalfWidthMin,
                 RtApex = p.TrRecalibrated,
                 PrecursorQuantity = p.PredictedIntensity,
-                PredictedPriority = predicted?.Lookup(
-                    p.ModifiedPeptide, p.StrippedPeptide, p.PrecursorCharge),
+                // Within-protein priority source, in order: Bromo ranking, then
+                // Carafe detectability (reusing the filter overlay), else null
+                // (scheduler falls back to the PrecursorQuantity stand-in).
+                PredictedPriority =
+                    predicted?.Lookup(p.ModifiedPeptide, p.StrippedPeptide, p.PrecursorCharge)
+                    ?? detectability?.Lookup(p.ModifiedPeptide, p.StrippedPeptide, p.PrecursorCharge),
                 QValue = 0.0,
                 ProteinQValue = double.NaN,
                 Proteotypic = p.ProteinAccessions.Length == 1 ? 1 : 0,

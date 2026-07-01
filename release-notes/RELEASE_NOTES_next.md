@@ -4,6 +4,8 @@ Working draft for the next release. Append entries here as features and fixes la
 
 ## New Features
 
+- Carafe detectability now also serves as the within-protein **ranking fallback**: when no Bromo ranking file is loaded, peptide priority is driven by Carafe detectability (auto-selecting `PredictedRanking`) instead of the no-signal fragment-intensity stand-in. Bromo, when supplied, still takes precedence for ranking and detectability then only filters.
+- The **Bromo peptide ranking** input is now a single-file, Bromo-only selector (Carafe detectability predictions have their own input).
 - Added a separate **Carafe detectability predictions** input (multi-file / folder) plus a **detectability cutoff** slider (default 0.5) for the Carafe path. This is independent of the predicted peptide-ranking overlay, so a user can rank with Bromo and filter by Carafe detectability simultaneously. Precursors below the cutoff are dropped before scheduling (peptides with no prediction are kept); the slider rebuilds the candidate pool and reschedules live. Empirical calibration: ~0.5 removes peptides ~90% unlikely to be observed while keeping most real detections.
 
 - Added a configurable **Predicted peak half-width** slider (seconds) for the Carafe path, replacing the hardcoded 0.10 min synthesised peak. Adjusting it rebuilds the Carafe candidate pool and reschedules live; ignored on the DIA-NN / Skyline paths, which use measured peak boundaries.

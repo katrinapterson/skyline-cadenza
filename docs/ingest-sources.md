@@ -131,34 +131,36 @@ on the unique-before-razor tier (which IS meaningful), and the
 
 #### Predicted-ranking overlay (recommended)
 
-To get a real WITHIN-protein peptide ranking, supply a predicted
-peptide-ranking file alongside the Carafe library (UI: "Predicted
-peptide ranking"; `MainViewModel.PredictedRankingPath`). The overlay
-carries no fragments / m/z / RT, so it is not a candidate pool on its
-own; `PredictedRankingReader` reads it and
-`CandidateBuilder.BuildFromCarafe` matches each score onto the Carafe
-candidate pool by (peptide, charge), populating
-`Candidate.PredictedPriority`. When an overlay is loaded the
+To get a real WITHIN-protein peptide ranking, supply a ranking source
+alongside the Carafe library. There are two inputs, both read by
+`PredictedRankingReader` and matched onto the candidate pool by
+(peptide, charge) in `CandidateBuilder.BuildFromCarafe`, populating
+`Candidate.PredictedPriority`. When either supplies a priority the
 peptide-ranking selector auto-switches to
 `PeptidePriority.PredictedRanking`, which orders peptides within each
 protein by that score, descending (candidates with no match sort last).
 
-Two interchangeable formats are auto-detected from the header:
+The two inputs and their precedence:
 
-- **Bromo** `peptide_rankings.tsv`:
-  `protein, peptide (SEQ|charge), mean_pred_score, wins, rank`. The
-  score is `mean_pred_score` (higher = better). Peptides are
-  unmodified, so the match is on stripped sequence + charge.
-- **Carafe** `*_detectability_pred.tsv`:
-  `sequence, charge, ModifiedPeptide, detectability_pred, ...`. The
-  score is `detectability_pred` (higher = better). Matched on the
-  Carafe-form `ModifiedPeptide` + charge, with stripped sequence +
-  charge as a fallback. Carafe emits these in shards; multi-select the
-  shard files in the file dialog, point at the folder, or pick any one
-  `*_detectability_pred.tsv` in it (a lone file pulls in its folder
-  siblings). The reader merges every selected shard, keeping the higher
-  score on key collisions. Enter one path per line to mix files and
-  folders.
+- **Bromo peptide ranking** (UI: "Bromo peptide ranking";
+  `MainViewModel.PredictedRankingPath`) - a single
+  `peptide_rankings.tsv` (`protein, peptide (SEQ|charge),
+  mean_pred_score, wins, rank`; score = `mean_pred_score`, higher =
+  better, matched on stripped sequence + charge). When present it is the
+  ranking source.
+- **Carafe detectability predictions** (UI: "Carafe detectability
+  predictions"; `MainViewModel.DetectabilityPath`) - one or more
+  `*_detectability_pred.tsv` files or a folder
+  (`sequence, charge, ModifiedPeptide, detectability_pred, ...`; score =
+  `detectability_pred`, matched on Carafe-form `ModifiedPeptide` + charge
+  with stripped fallback; shards are merged, higher score wins). This
+  input drives the detectability cutoff filter, and **also serves as the
+  ranking fallback**: when no Bromo file is loaded, detectability
+  populates `PredictedPriority` so peptides are ordered by detectability
+  rather than the no-signal `PrecursorQuantity` stand-in.
+
+So the ranking-priority source is: Bromo if provided, else Carafe
+detectability if provided, else the `PrecursorQuantity` stand-in.
 
 This is a within-protein signal only. It does NOT give cross-protein
 abundance, so it does not feed protein ranking (see below).

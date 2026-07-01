@@ -101,10 +101,13 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
 ### Carafe detectability predictions + cutoff (Carafe path only)
 
 - **Detectability predictions**: one or more Carafe `*_detectability_pred.tsv`
-  files (multi-select) or a folder, entered separately from the predicted
-  peptide-ranking overlay. This lets you rank with one source (e.g. Bromo) and
-  filter with Carafe detectability at the same time. Parsed by
-  `PredictedRankingReader` (same reader as the ranking overlay).
+  files (multi-select) or a folder, entered separately from the Bromo
+  peptide-ranking overlay. Parsed by `PredictedRankingReader`. Two roles:
+  1. the cutoff filter below, and
+  2. the within-protein ranking **fallback** - when no Bromo file is loaded,
+     detectability drives peptide priority (`PeptidePriority.PredictedRanking`)
+     instead of the no-signal `PrecursorQuantity` stand-in. Bromo, if supplied,
+     takes precedence for ranking; detectability then only filters.
 - **Detectability cutoff** (default **0.5**): precursors whose looked-up Carafe
   detectability is below this are dropped from the candidate pool before
   scheduling. Precursors with no prediction are kept (unknown is not filtered).

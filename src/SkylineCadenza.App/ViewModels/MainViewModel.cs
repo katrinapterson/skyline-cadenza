@@ -965,11 +965,14 @@ public partial class MainViewModel : ObservableObject
         RebuildCarafeCandidates();
 
         string fragSourceLabel = $"Carafe predicted fragments; peak half-width {PeakHalfWidthSec:0} s";
-        if (predicted is not null)
+        // Auto-select the predicted ranking whenever either overlay supplies a
+        // within-protein priority: Bromo takes precedence, else detectability.
+        if (predicted is not null || detectability is not null)
         {
             int matched = _candidates!.Count(c => c.PredictedPriority is not null);
-            PeptideRanking = PeptidePriority.PredictedRanking; // auto-select predicted ranking
-            fragSourceLabel = $"predicted ranking matched {matched:n0}/{_candidates!.Count:n0}";
+            PeptideRanking = PeptidePriority.PredictedRanking;
+            string src = predicted is not null ? "Bromo ranking" : "Carafe detectability ranking";
+            fragSourceLabel = $"{src} matched {matched:n0}/{_candidates.Count:n0}";
         }
         if (detectability is not null)
             fragSourceLabel += $"; detectability >= {DetectabilityCutoff:0.00} ({_candidates!.Count:n0} precursors kept)";
