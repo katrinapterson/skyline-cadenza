@@ -638,6 +638,7 @@ public partial class MainViewModel : ObservableObject
             }
 
             _candidates = loadResult.Candidates;
+            _carafePrecursors = null; // Skyline pool uses BLIB / measured peak widths
             _knownAccessions = _candidates.Select(c => c.ProteinGroup).ToHashSet();
             _geneToAccession = new Dictionary<string, IReadOnlyList<string>>();
 
@@ -839,10 +840,10 @@ public partial class MainViewModel : ObservableObject
         bool hasTargets = !string.IsNullOrWhiteSpace(TargetProteinsText);
 
         if (!hasReport && !(hasCarafe && hasTargets))
-        {
+            {
             StatusMessage = "Need either a DIA-NN report.parquet, OR a Carafe library + a target protein list.";
-            return;
-        }
+                return;
+            }
 
         IsBusy = true;
         try
@@ -878,6 +879,7 @@ public partial class MainViewModel : ObservableObject
         }
 
         _candidates = CandidateBuilder.Build(rows, parsimony, frags);
+        _carafePrecursors = null; // DIA-NN pool uses measured peak widths
         await FinalizeLoadAsync(
             fragSourceLabel: frags.Count > 0 ? "Carafe library" : "DIA-NN report fragments",
             sourceLabel: "DIA-NN report");
@@ -923,10 +925,16 @@ public partial class MainViewModel : ObservableObject
                 PredictedRankingReader.LoadFromPaths(predictedPaths));
         }
 
-        _candidates = CandidateBuilder.BuildFromCarafe(
-            carafePrecursors, parsimony, predicted: predicted);
+        // Cache the raw inputs so the peak-half-width slider can rebuild
+        // candidates + reschedule live without re-streaming the library.
+        _carafePrecursors = carafePrecursors;
+        _carafeParsimony = parsimony;
+        _carafePredicted = predicted;
 
-        string fragSourceLabel = "Carafe predicted fragments";
+        _candidates = CandidateBuilder.BuildFromCarafe(
+            carafePrecursors, parsimony, PeakHalfWidthMin, predicted);
+
+        string fragSourceLabel = $"Carafe predicted fragments; peak half-width {PeakHalfWidthSec:0} s";
         if (predicted is not null)
         {
             int matched = _candidates.Count(c => c.PredictedPriority is not null);
@@ -1096,6 +1104,20 @@ public partial class MainViewModel : ObservableObject
     partial void OnFragmentTolDaChanged(double value) => _ = RescheduleAsync();
     partial void OnCycleBudgetChanged(int value) => _ = RescheduleAsync();
     partial void OnFiringPadSecChanged(double value) => _ = RescheduleAsync();
+
+    // Peak half-width is baked into each candidate's RtStart/RtStop at build
+    // time, so it only affects the Carafe pool and requires rebuilding
+    // candidates (not just rescheduling). Rebuild from the cached precursors
+    // and reschedule; no-op for DIA-NN / Skyline pools (cache is null).
+    partial void OnPeakHalfWidthSecChanged(double value)
+    {
+        OnPropertyChanged(nameof(PeakHalfWidthMin));
+        if (_carafePrecursors is null || _carafeParsimony is null) return;
+        _candidates = CandidateBuilder.BuildFromCarafe(
+            _carafePrecursors, _carafeParsimony, PeakHalfWidthMin, _carafePredicted);
+        _ = RescheduleAsync();
+    }
+
     partial void OnPrmIsolationWidthThChanged(double value) => _ = RescheduleAsync();
     partial void OnChargeHandlingChanged(ChargeHandling value) => _ = RescheduleAsync();
     // NormalizedCollisionEnergy is output-only - no reschedule.

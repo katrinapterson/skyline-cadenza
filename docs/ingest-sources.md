@@ -74,8 +74,11 @@ spectral library Carafe produces from a target protein list).
   to Skyline's `C[UniMod:4]DIVIEK` form downstream.
 - Peak: `RtApex` from `Tr_recalibrated` (Carafe's predicted apex).
   `RtStart` / `RtStop` are SYNTHESISED in `CandidateBuilder.BuildFromCarafe`
-  as `RtApex +/- peakHalfWidthMin` (default 0.10 min). The scheduler
-  then layers its time padding on top.
+  as `RtApex +/- peakHalfWidthMin` (default 0.10 min / 6 s), exposed as the
+  "Predicted peak half-width" UI slider; adjusting it rebuilds the Carafe
+  pool and reschedules live. The scheduler then layers its time padding on
+  top. Empirical peaks (DIA-NN search of the matched run) are wider - median
+  ~0.40 min full width - so the default is on the tight side.
 - Quality: `QValue = 0.0` (there's no q-value on a prediction; the
   filter is upstream, in Carafe's own training data). `ProteinQValue =
   NaN`.

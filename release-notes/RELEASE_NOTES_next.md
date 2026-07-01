@@ -4,6 +4,7 @@ Working draft for the next release. Append entries here as features and fixes la
 
 ## New Features
 
+- Added a configurable **Predicted peak half-width** slider (seconds) for the Carafe workflow, replacing the hardcoded 0.10 min synthesised peak. Adjusting it rebuilds the Carafe candidate pool and reschedules live; ignored on the DIA-NN / Skyline paths, which use measured peak boundaries.
 - Added a predicted peptide-ranking overlay for Carafe-only mode. Supply a Bromo `peptide_rankings.tsv` or Carafe `*_detectability_pred.tsv` (multi-select several shard files, a folder of shards, or one path per line) via the new "Predicted peptide ranking" input. The score is matched onto the Carafe candidate pool by (peptide, charge) and drives a real within-protein peptide priority (`PeptidePriority.PredictedRanking`), which auto-selects when an overlay is loaded. Replaces the no-signal fragment-intensity-sum stand-in documented in `docs/ingest-sources.md`. Within-protein only; it does not affect cross-protein protein ranking.
 
 ## Bug Fixes

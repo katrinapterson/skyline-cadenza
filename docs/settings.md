@@ -98,6 +98,22 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
   (kept unrenamed for now to avoid churning the public Core API; the
   UI label and docs use "time padding").
 
+### Predicted peak half-width (sec, Carafe workflow only)
+
+- Default: 6.0 s (0.10 min).
+- Half-width of the synthesised peak on the Carafe path, where the
+  predicted library carries only an apex (`Tr_recalibrated`). The
+  candidate's unpadded peak is `apex +/- this`, and the time-padding
+  buffer above is added on top. Empirically (DIA-NN search of the
+  matched run) real peaks are wider - median full width ~0.40 min, i.e.
+  ~0.20 min (12 s) half-width - so the default is on the tight side;
+  raise it toward 10-12 s for more realistic windows.
+- Ignored on the DIA-NN and Skyline-document workflows, which use the
+  real measured `RT.Start` / `RT.Stop` (or BLIB) boundaries.
+- The matching code symbol is the `peakHalfWidthMin` parameter of
+  `CandidateBuilder.BuildFromCarafe`; the UI exposes it in seconds.
+  Adjusting it rebuilds the Carafe candidate pool and reschedules live.
+
 ### RT bin width (min)
 
 - Default: 0.05 min (3 s).

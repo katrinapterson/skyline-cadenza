@@ -48,6 +48,9 @@
                              VerticalScrollBarVisibility="Auto" MaxHeight="64"
                              ToolTip="One file or folder per line. Multi-select in the file dialog to add several detectability shards."/>
                 </DockPanel>
+                <TextBlock Text="{Binding PeakHalfWidthSec, StringFormat='Predicted peak half-width (Carafe): {0:0} s'}" Margin="0,8,0,0"
+                           ToolTip="Half-width of the synthesised peak on the Carafe path (apex +/- this), since the predicted library carries only an apex. The RT buffer below is added on top. Ignored for the DIA-NN workflow (real RT.Start/RT.Stop are used)."/>
+                <Slider Minimum="2" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeakHalfWidthSec}"/>
                 <Button Content="Load + schedule" Command="{Binding LoadCommand}" Margin="0,8,0,4"/>
                 <DockPanel LastChildFill="True" Margin="0,0,0,4">
                     <Button DockPanel.Dock="Right" Content="Cancel" Width="64"
