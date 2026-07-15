@@ -13,7 +13,8 @@ public class SchedulerTests
         string group,
         double quantity = 1e6,
         double[]? fragments = null,
-        double? predicted = null)
+        double? predicted = null,
+        CandidateSource source = CandidateSource.Experimental)
     {
         // Synthesise FragmentIon entries from the supplied mz array.
         // Intensities are assigned descending so the input order matches
@@ -42,6 +43,7 @@ public class SchedulerTests
             Fragments = ions,
             Top4Fragments = Candidate.DeriveTopMz(ions, 4),
             Run = "test",
+            Source = source,
         };
     }
 
@@ -547,5 +549,98 @@ public class SchedulerTests
         var scheduledIds = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToList();
         Assert.Single(scheduledIds);
         Assert.Equal("high", scheduledIds[0]);
+    }
+
+    [Fact]
+    public void Scheduler_ExperimentalWinsScarceBudgetOverPredicted()
+    {
+        // One concurrent slot available at this RT. A confirmed target and a
+        // predicted target both want it but their fragments clash, so they
+        // cannot multiplex. The experimental tier runs first and takes the
+        // only slot; the predicted target is dropped rather than displacing it.
+        var cands = new[]
+        {
+            Make("exp", 500.0, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 },
+                source: CandidateSource.Experimental),
+            Make("pred", 500.2, 5.0, 5.4, "G2", fragments: new[] { 100.1, 200.1, 300.1, 400.1 },
+                source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 1, FragmentTolDa = 0.5 });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToList();
+        Assert.Single(scheduled);
+        Assert.Equal("exp", scheduled[0]);
+    }
+
+    [Fact]
+    public void Scheduler_PredictedBackfillsIntoLeftoverSlotCapacity()
+    {
+        // A confirmed target opens a slot; a co-eluting predicted target with
+        // disjoint fragments backfills the same slot (leftover multiplexing
+        // capacity) instead of being ignored.
+        var cands = new[]
+        {
+            Make("exp", 500.0, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 },
+                source: CandidateSource.Experimental),
+            Make("pred", 500.5, 5.1, 5.5, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 },
+                source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 1 });
+
+        Assert.Equal(2, result.ScheduledIndices.Length);
+        Assert.Single(result.Slots);
+        Assert.Equal(2, result.Slots[0].MemberIndices.Count);
+        Assert.Equal(2, result.ProteinGroupsCovered);
+    }
+
+    [Fact]
+    public void Scheduler_PredictedRespectsPerProteinCapAlreadySpentByExperimental()
+    {
+        // Shared per-protein cap across tiers. G1 spends its Max=2 on two
+        // confirmed peptides, so its predicted peptide must NOT be added. G2
+        // has only one confirmed peptide, so a predicted peptide DOES backfill
+        // its remaining depth. All at distinct RTs so budget is never binding.
+        var cands = new[]
+        {
+            Make("G1.exp1", 500.0, 1.0, 1.4, "G1", quantity: 9e6, source: CandidateSource.Experimental),
+            Make("G1.exp2", 510.0, 2.0, 2.4, "G1", quantity: 8e6, source: CandidateSource.Experimental),
+            Make("G1.pred", 520.0, 3.0, 3.4, "G1", quantity: 7e6, source: CandidateSource.Predicted),
+            Make("G2.exp1", 600.0, 5.0, 5.4, "G2", quantity: 9e6, source: CandidateSource.Experimental),
+            Make("G2.pred", 610.0, 6.0, 6.4, "G2", quantity: 7e6, source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 2,
+            Objective = CoverageObjective.MaximizeProteins,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Contains("G1.exp1", scheduled);
+        Assert.Contains("G1.exp2", scheduled);
+        Assert.DoesNotContain("G1.pred", scheduled); // G1 already at cap via experimental
+        Assert.Contains("G2.exp1", scheduled);
+        Assert.Contains("G2.pred", scheduled);       // G2 had room for predicted depth
+    }
+
+    [Fact]
+    public void Scheduler_PredictedCoversProteinNotSeenExperimentally()
+    {
+        // A protein present only in the predicted tier is covered in the
+        // second pass once the experimental tier is done.
+        var cands = new[]
+        {
+            Make("G1.exp", 500.0, 5.0, 5.4, "G1", source: CandidateSource.Experimental),
+            Make("G2.pred", 800.0, 8.0, 8.4, "G2", source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100 });
+
+        Assert.Equal(2, result.ProteinGroupsCovered);
+        var scheduled = result.ScheduledIndices.Select(i => cands[i]).ToList();
+        Assert.Contains(scheduled, c => c.ProteinGroup == "G2" && c.Source == CandidateSource.Predicted);
     }
 }

@@ -411,9 +411,8 @@ public static class Scheduler
         });
 
         var scheduledToSlot = new Dictionary<int, int>();
-        var groupQueueCursor = new Dictionary<string, int>(groupOrder.Count);
         var scheduledPerGroup = new Dictionary<string, int>(groupOrder.Count);
-        foreach (var g in groupOrder) { groupQueueCursor[g] = 0; scheduledPerGroup[g] = 0; }
+        foreach (var g in groupOrder) { scheduledPerGroup[g] = 0; }
         var coveredGroups = new HashSet<string>();
         // Effective load-up cap by objective:
         //   Balanced         - user's MaxPeptidesPerProtein.
@@ -435,6 +434,30 @@ public static class Scheduler
             CoverageObjective.MaximizePeptides => int.MaxValue,
             _ => rawMax,
         };
+
+        // Partition each group's ranked queue by source tier, preserving the
+        // within-group sort. Predicted candidates land in a separate queue so
+        // they only compete for budget after the experimental tier is done.
+        Dictionary<string, List<int>> QueuesForTier(CandidateSource src) =>
+            groupOrder.ToDictionary(
+                g => g,
+                g => groupToRanked[g].Where(i => candidates[i].Source == src).ToList());
+
+        bool useLookAhead = parameters.Objective != CoverageObjective.Balanced;
+
+        // Two-tier scheduling. Schedule every Experimental (measured) candidate
+        // first via the full cover + load-up, then let Predicted (Carafe
+        // backfill) candidates reuse whatever cycle budget is left. The shared
+        // occupancy (slotsPerBin / slots) and per-group counts persist across
+        // tiers, so predicted peptides respect the same budget and the same
+        // per-protein cap as the confirmed ones. A single-tier all-experimental
+        // pool (every existing ingest path and test) leaves the predicted
+        // queues empty, so the second iteration is a no-op and the schedule is
+        // identical to before - this is what preserves the golden fixtures.
+        foreach (var tier in new[] { CandidateSource.Experimental, CandidateSource.Predicted })
+        {
+            var queues = QueuesForTier(tier);
+            var cursors = groupOrder.ToDictionary(g => g, _ => 0);
 
         // Pass 1: cover one peptide per group. Cover-pass strategy is
         // selected by Objective:
@@ -461,12 +484,15 @@ public static class Scheduler
         // cursor at 0 because it considered-but-didn't-try most of the
         // queue (load-up walks from 0 and skips already-scheduled
         // candidates to recover them).
-        bool useLookAhead = parameters.Objective != CoverageObjective.Balanced;
         foreach (var g in groupOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var queue = groupToRanked[g];
-            int cursor = groupQueueCursor[g];
+            // Skip groups an earlier tier already covered: a predicted peptide
+            // never re-covers a protein an experimental peptide already
+            // covered; its depth is added by the load-up loop instead.
+            if (coveredGroups.Contains(g)) continue;
+            var queue = queues[g];
+            int cursor = cursors[g];
             int chosenSid = -1;
             int chosenCandIdx = -1;
 
@@ -560,7 +586,7 @@ public static class Scheduler
                         break;
                     }
                 }
-                groupQueueCursor[g] = cursor;
+                cursors[g] = cursor;
             }
 
             if (chosenSid >= 0)
@@ -593,8 +619,8 @@ public static class Scheduler
                 {
                     if (!coveredGroups.Contains(g)) continue;
                     if (scheduledPerGroup[g] >= effectiveMaxPerGroup) continue;
-                    var queue = groupToRanked[g];
-                    int cursor = groupQueueCursor[g];
+                    var queue = queues[g];
+                    int cursor = cursors[g];
                     while (cursor < queue.Count)
                     {
                         int candIdx = queue[cursor];
@@ -612,11 +638,12 @@ public static class Scheduler
                             break;
                         }
                     }
-                    groupQueueCursor[g] = cursor;
+                    cursors[g] = cursor;
                 }
                 if (!changed) break;
             }
         }
+        } // end tier loop (Experimental, then Predicted)
 
         // Min-peptides-per-protein enforcement: drop any group that
         // didn't reach the minimum and free the slot capacity its peptides

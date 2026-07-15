@@ -142,6 +142,34 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
   density but more memory and CPU. Larger bins = coarser smoothing and
   spurious budget rejections near peak edges.
 
+## DIA-NN + Carafe backfill
+
+### Backfill unused schedule time with Carafe predictions (checkbox)
+
+- Default: **off**. Requires both a DIA-NN report and a Carafe library.
+- **On**: builds a two-tier candidate pool. The confirmed DIA-NN targets
+  (experimental tier) are scheduled to exhaustion first; the Carafe-predicted
+  targets (predicted tier) then reuse whatever cycle budget is left. Predicted
+  precursors that duplicate a confirmed one on (stripped peptide, charge) are
+  dropped. Predictions are scoped to the accessions DIA-NN observed plus any
+  target-protein list, so they add depth to confirmed proteins and cover
+  proteins DIA-NN missed.
+- **Off**: the DIA-NN path is unchanged - the Carafe library only overrides the
+  measured fragments and adds no precursors.
+- The predicted tier honors the same **cycle budget** and **max peptides per
+  protein** as the confirmed tier (a protein already at its Max from
+  experimental peptides gets no predicted peptides), and its breadth-vs-depth
+  follows the selected **coverage objective**. The **peak half-width**,
+  **detectability**, and **Bromo ranking** controls apply to the predicted tier;
+  the status line reports the confirmed + predicted split.
+- Because predicted precursors join the pool, **protein ranking** (summed
+  intensity) and parsimony grouping see the combined evidence, so the confirmed
+  schedule can shift slightly versus DIA-NN alone. Confirmed coverage is not
+  reduced. Takes effect on the next Load.
+- Code path: `MainViewModel.LoadCombinedBackfillAsync` ->
+  `CandidateBuilder.BuildCombined`; the two-tier scheduling lives in
+  `Scheduler.Run` keyed on `Candidate.Source` (`CandidateSource`).
+
 ## Q-value filter (DIA-NN ingest)
 
 ### Q-value cutoff

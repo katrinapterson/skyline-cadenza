@@ -59,6 +59,15 @@ public partial class MainViewModel : ObservableObject
     /// </summary>
     [ObservableProperty] private double _detectabilityCutoff = 0.5;
 
+    /// <summary>
+    /// When a DIA-NN report and a Carafe library are both loaded, schedule the
+    /// confirmed DIA-NN targets first, then backfill leftover schedule capacity
+    /// with Carafe-predicted targets (deduped against the confirmed ones on
+    /// peptide + charge). Off = the Carafe library only overrides DIA-NN
+    /// fragments and adds no precursors. Takes effect on the next Load.
+    /// </summary>
+    [ObservableProperty] private bool _backfillWithPredictions;
+
     // Acquisition + load balancing
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SlotsLabel))]
@@ -162,6 +171,11 @@ public partial class MainViewModel : ObservableObject
     private IReadOnlyDictionary<string, (string Group, string Type)>? _carafeParsimony;
     private PredictedRankingReader.Result? _carafePredicted;
     private PredictedRankingReader.Result? _carafeDetectability;
+    // Combined DIA-NN + Carafe backfill: when non-null, the cached Carafe
+    // precursors above are the PREDICTED tier and these are the EXPERIMENTAL
+    // tier's inputs, so the sliders rebuild the whole two-tier pool live.
+    private List<DiannRow>? _combinedDiannRows;
+    private IReadOnlyDictionary<FragmentKey, FragmentIon[]>? _combinedFrags;
     private System.Threading.Timer? _skylinePoll;
     private int _skylinePollFailures;
     private CancellationTokenSource? _skylineLoadCts;
@@ -661,6 +675,7 @@ public partial class MainViewModel : ObservableObject
 
             _candidates = loadResult.Candidates;
             _carafePrecursors = null; _carafeDetectability = null; // Skyline pool uses BLIB / measured peak widths
+            _combinedDiannRows = null; _combinedFrags = null;
             _knownAccessions = _candidates.Select(c => c.ProteinGroup).ToHashSet();
             _geneToAccession = new Dictionary<string, IReadOnlyList<string>>();
 
@@ -885,14 +900,13 @@ public partial class MainViewModel : ObservableObject
         var rows = await DiannParquetReader.LoadAsync(ReportPath!, QValueCutoff);
         StatusMessage = $"Loaded {rows.Count:n0} precursors. Running parsimony...";
 
-        var pepMap = DiannParquetReader.BuildPeptideProteinMap(rows);
-        var parsimony = ParsimonyEngine.Assign(pepMap);
-
+        bool hasCarafe = !string.IsNullOrEmpty(CarafeTsvPath) && File.Exists(CarafeTsvPath);
         _geneToAccession = ProteinListParser.BuildGeneToAccession(rows);
-        _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
 
+        // Carafe fragment overlay for the DIA-NN (experimental) rows. Present
+        // on both the plain and the backfill path - it only swaps fragments.
         var frags = new Dictionary<FragmentKey, FragmentIon[]>();
-        if (!string.IsNullOrEmpty(CarafeTsvPath) && File.Exists(CarafeTsvPath))
+        if (hasCarafe)
         {
             StatusMessage = $"Streaming Carafe library {Path.GetFileName(CarafeTsvPath)}...";
             var allowed = new HashSet<string>(rows.Select(r => CarafeKey.FromDiann(r.ModifiedSequence)));
@@ -900,11 +914,102 @@ public partial class MainViewModel : ObservableObject
                 CarafeTsvPath!, allowed, Candidate.FragmentLimit));
         }
 
+        if (BackfillWithPredictions && hasCarafe)
+        {
+            await LoadCombinedBackfillAsync(rows, frags);
+            return;
+        }
+
+        var pepMap = DiannParquetReader.BuildPeptideProteinMap(rows);
+        var parsimony = ParsimonyEngine.Assign(pepMap);
+        _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
+
         _candidates = CandidateBuilder.Build(rows, parsimony, frags);
-        _carafePrecursors = null; _carafeDetectability = null; // DIA-NN pool uses measured peak widths
+        // Clear every Carafe-pool cache so the sliders no-op on this pool.
+        _carafePrecursors = null; _carafeDetectability = null;
+        _combinedDiannRows = null; _combinedFrags = null;
         await FinalizeLoadAsync(
             fragSourceLabel: frags.Count > 0 ? "Carafe library" : "DIA-NN report fragments",
             sourceLabel: "DIA-NN report");
+    }
+
+    /// <summary>
+    /// Combined DIA-NN + Carafe "backfill" pool: confirmed DIA-NN targets
+    /// (experimental tier) plus Carafe-predicted targets (predicted tier) that
+    /// backfill leftover schedule capacity. The Carafe library is scoped to the
+    /// proteins DIA-NN saw plus the optional target-protein list.
+    /// </summary>
+    private async Task LoadCombinedBackfillAsync(
+        List<DiannRow> rows, Dictionary<FragmentKey, FragmentIon[]> frags)
+    {
+        // Scope predictions to proteins DIA-NN observed, plus any target list.
+        var allowedAccessions = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var r in rows)
+            foreach (var id in r.ProteinIds.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                allowedAccessions.Add(ProteinListParser.ExtractAccession(id.Trim()));
+        foreach (var t in ProteinListParser.ParseText(TargetProteinsText))
+            allowedAccessions.Add(t);
+
+        StatusMessage = $"Streaming Carafe predictions for {allowedAccessions.Count:n0} proteins...";
+        var carafePrecursors = await Task.Run(() =>
+            CarafeLibraryReader.LoadCandidates(CarafeTsvPath!, allowedAccessions));
+
+        // Shared parsimony over the union of DIA-NN + Carafe evidence so a
+        // predicted peptide lands in the same group as its confirmed protein.
+        var pepMap = CandidateBuilder.MergePeptideProteinMaps(
+            DiannParquetReader.BuildPeptideProteinMap(rows),
+            CandidateBuilder.CarafePeptideProteinMap(carafePrecursors));
+        var parsimony = ParsimonyEngine.Assign(pepMap);
+        _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
+
+        // Optional Bromo within-protein ranking overlay for the predicted tier.
+        PredictedRankingReader.Result? predicted = null;
+        if (!string.IsNullOrWhiteSpace(PredictedRankingPath))
+        {
+            StatusMessage = $"Reading Bromo ranking {Path.GetFileName(PredictedRankingPath)}...";
+            predicted = await Task.Run(() =>
+                PredictedRankingReader.LoadFromPath(PredictedRankingPath!));
+        }
+
+        // Optional Carafe detectability filter for the predicted tier.
+        PredictedRankingReader.Result? detectability = null;
+        var detPaths = ParsePredictedRankingPaths(DetectabilityPath);
+        if (detPaths.Count > 0)
+        {
+            StatusMessage = detPaths.Count == 1
+                ? $"Reading detectability {Path.GetFileName(detPaths[0])}..."
+                : $"Reading detectability from {detPaths.Count} files...";
+            detectability = await Task.Run(() => PredictedRankingReader.LoadFromPaths(detPaths));
+        }
+
+        // Cache both tiers' inputs so the peak-half-width / detectability
+        // sliders rebuild the whole two-tier pool live (no library re-stream).
+        _combinedDiannRows = rows;
+        _combinedFrags = frags;
+        _carafePrecursors = carafePrecursors;
+        _carafeParsimony = parsimony;
+        _carafePredicted = predicted;
+        _carafeDetectability = detectability;
+
+        RebuildCarafeCandidates();
+
+        var built = _candidates!;
+        int confirmed = built.Count(c => c.Source == CandidateSource.Experimental);
+        int predictedCount = built.Count - confirmed;
+        string fragSourceLabel =
+            $"{confirmed:n0} confirmed + {predictedCount:n0} predicted; peak half-width {PeakHalfWidthSec:0} s";
+        if (predicted is not null || detectability is not null)
+        {
+            PeptideRanking = PeptidePriority.PredictedRanking;
+            string src = predicted is not null ? "Bromo ranking" : "Carafe detectability ranking";
+            fragSourceLabel += $"; predicted tier ranked by {src}";
+        }
+        if (detectability is not null)
+            fragSourceLabel += $"; detectability >= {DetectabilityCutoff:0.00}";
+
+        await FinalizeLoadAsync(
+            fragSourceLabel: fragSourceLabel,
+            sourceLabel: "DIA-NN report + Carafe backfill");
     }
 
     private async Task LoadFromCarafeOnlyAsync()
@@ -961,6 +1066,7 @@ public partial class MainViewModel : ObservableObject
         _carafeParsimony = parsimony;
         _carafePredicted = predicted;
         _carafeDetectability = detectability;
+        _combinedDiannRows = null; _combinedFrags = null; // Carafe-only: single tier
 
         RebuildCarafeCandidates();
 
@@ -972,7 +1078,7 @@ public partial class MainViewModel : ObservableObject
             int matched = _candidates!.Count(c => c.PredictedPriority is not null);
             PeptideRanking = PeptidePriority.PredictedRanking;
             string src = predicted is not null ? "Bromo ranking" : "Carafe detectability ranking";
-            fragSourceLabel = $"{src} matched {matched:n0}/{_candidates.Count:n0}";
+            fragSourceLabel = $"{src} matched {matched:n0}/{_candidates!.Count:n0}";
         }
         if (detectability is not null)
             fragSourceLabel += $"; detectability >= {DetectabilityCutoff:0.00} ({_candidates!.Count:n0} precursors kept)";
@@ -990,6 +1096,15 @@ public partial class MainViewModel : ObservableObject
     private void RebuildCarafeCandidates()
     {
         if (_carafePrecursors is null || _carafeParsimony is null) return;
+        if (_combinedDiannRows is not null && _combinedFrags is not null)
+        {
+            // Combined backfill pool: experimental DIA-NN tier + predicted
+            // Carafe tier, deduped on (peptide, charge).
+            _candidates = CandidateBuilder.BuildCombined(
+                _combinedDiannRows, _combinedFrags, _carafePrecursors, _carafeParsimony,
+                PeakHalfWidthMin, _carafePredicted, _carafeDetectability, DetectabilityCutoff);
+            return;
+        }
         _candidates = CandidateBuilder.BuildFromCarafe(
             _carafePrecursors, _carafeParsimony, PeakHalfWidthMin,
             _carafePredicted, _carafeDetectability, DetectabilityCutoff);

@@ -78,4 +78,73 @@ public class CandidateBuilderTests
         Assert.Single(c);
         Assert.Null(c[0].PredictedPriority);
     }
+
+    private static DiannRow DiannRow(string strippedSeq, int charge, string proteinId) =>
+        new()
+        {
+            PrecursorId = $"{strippedSeq}+{charge}",
+            ModifiedSequence = strippedSeq,
+            StrippedSequence = strippedSeq,
+            PrecursorCharge = charge,
+            PrecursorMz = 500.0,
+            RtApex = 20.0,
+            RtStart = 19.8,
+            RtStop = 20.2,
+            PrecursorQuantity = 1e6,
+            Proteotypic = 1,
+            ProteinIds = proteinId,
+            Genes = "",
+            Run = "run1",
+            QValue = 0.001,
+            ProteinQValue = 0.001,
+            Fragments = System.Array.Empty<FragmentIon>(),
+        };
+
+    private static CarafePrecursor Carafe(string strippedSeq, int charge, string accession) =>
+        new()
+        {
+            ModifiedPeptide = $"_{strippedSeq}_",
+            StrippedPeptide = strippedSeq,
+            PrecursorMz = 500.0,
+            PrecursorCharge = charge,
+            TrRecalibrated = 20.0,
+            ProteinIdRaw = $"sp|{accession}|NAME",
+            ProteinAccessions = new[] { accession },
+            PredictedIntensity = 1.0,
+            Fragments = System.Array.Empty<FragmentIon>(),
+        };
+
+    [Fact]
+    public void BuildCombined_DedupsPredictedDuplicateOnPeptideAndCharge_KeepsOtherChargeAndNewPeptide()
+    {
+        // Confirmed by DIA-NN: PEPTIDEK+2.
+        var rows = new[] { DiannRow("PEPTIDEK", 2, "P1") };
+        var carafe = new[]
+        {
+            Carafe("PEPTIDEK", 2, "P1"), // exact duplicate of the confirmed target -> dropped
+            Carafe("PEPTIDEK", 3, "P1"), // same peptide, different charge -> kept as predicted
+            Carafe("OTHERPEP", 2, "P2"), // brand-new peptide -> kept as predicted
+        };
+        var parsimony = new Dictionary<string, (string Group, string Type)>
+        {
+            ["PEPTIDEK"] = ("P1", "unique"),
+            ["OTHERPEP"] = ("P2", "unique"),
+        };
+
+        var result = CandidateBuilder.BuildCombined(
+            rows, new Dictionary<FragmentKey, FragmentIon[]>(), carafe, parsimony);
+
+        // 1 confirmed + 2 predicted survivors.
+        Assert.Equal(3, result.Count);
+
+        var confirmed = result.Where(c => c.Source == CandidateSource.Experimental).ToList();
+        Assert.Equal("PEPTIDEK", Assert.Single(confirmed).StrippedSequence);
+        Assert.Equal(2, confirmed[0].PrecursorCharge);
+
+        var predicted = result.Where(c => c.Source == CandidateSource.Predicted)
+            .Select(c => (c.StrippedSequence, c.PrecursorCharge)).ToHashSet();
+        Assert.DoesNotContain(("PEPTIDEK", 2), predicted); // deduped
+        Assert.Contains(("PEPTIDEK", 3), predicted);       // different charge kept
+        Assert.Contains(("OTHERPEP", 2), predicted);       // new peptide kept
+    }
 }

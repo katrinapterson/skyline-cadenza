@@ -1,6 +1,21 @@
 namespace SkylineCadenza.Core.Scheduling;
 
 /// <summary>
+/// Where a <see cref="Candidate"/> came from. Drives the scheduler's two-tier
+/// ordering: <see cref="Experimental"/> targets (measured DIA-NN detections)
+/// are scheduled to exhaustion first, then <see cref="Predicted"/> targets
+/// (Carafe library predictions) backfill whatever schedule capacity is left.
+/// </summary>
+public enum CandidateSource
+{
+    /// <summary>Confirmed by a measured detection (DIA-NN report / Skyline document).</summary>
+    Experimental,
+
+    /// <summary>Predicted-only (Carafe spectral-library backfill).</summary>
+    Predicted,
+}
+
+/// <summary>
 /// One scheduling candidate. Represents a single precursor (peptide + charge)
 /// already assigned to a parsimonious protein group with its top-4 fragment
 /// m/z values from the spectral library.
@@ -78,6 +93,16 @@ public sealed class Candidate
 
     /// <summary>DIA-NN <c>Run</c> name. Used to split per-run / per-GPF views.</summary>
     public required string Run { get; init; }
+
+    /// <summary>
+    /// Experimental (measured) vs predicted (Carafe backfill). Defaults to
+    /// <see cref="CandidateSource.Experimental"/> so every existing ingest path
+    /// and test - none of which set it - keeps producing a single-tier pool
+    /// that schedules exactly as before. Only the combined DIA-NN + Carafe
+    /// backfill path tags predicted candidates, activating the second tier in
+    /// <see cref="Scheduler.Run"/>.
+    /// </summary>
+    public CandidateSource Source { get; init; } = CandidateSource.Experimental;
 
     /// <summary>
     /// Number of fragments Cadenza keeps per precursor. Set wide enough

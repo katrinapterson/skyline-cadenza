@@ -39,6 +39,9 @@
                     <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
                     <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
                 </DockPanel>
+                <CheckBox Content="Backfill unused schedule time with Carafe predictions"
+                          IsChecked="{Binding BackfillWithPredictions}" Margin="0,6,0,0"
+                          ToolTip="Needs both a DIA-NN report and a Carafe library. Schedules the confirmed DIA-NN targets first, then fills leftover schedule capacity with Carafe-predicted targets (deduped against confirmed ones on peptide + charge), scoped to the proteins DIA-NN saw plus any target-protein list. Off: the Carafe library only overrides DIA-NN fragments and adds no precursors. Takes effect on the next Load."/>
                 <TextBlock Text="Bromo peptide ranking (optional)" Margin="0,8,0,0"
                            ToolTip="Carafe-only mode. A single Bromo peptide_rankings.tsv. Sets within-protein peptide priority; auto-selects the Predicted ranking option at load."/>
                 <DockPanel LastChildFill="True">

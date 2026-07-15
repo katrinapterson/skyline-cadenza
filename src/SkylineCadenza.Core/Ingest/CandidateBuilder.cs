@@ -96,7 +96,8 @@ public static class CandidateBuilder
         double peakHalfWidthMin = 0.10,
         PredictedRankingReader.Result? predicted = null,
         PredictedRankingReader.Result? detectability = null,
-        double minDetectability = 0.0)
+        double minDetectability = 0.0,
+        CandidateSource source = CandidateSource.Experimental)
     {
         bool filterDet = detectability is not null && minDetectability > 0.0;
         var candidates = new List<Candidate>();
@@ -135,9 +136,81 @@ public static class CandidateBuilder
                 Fragments = p.Fragments,
                 Top4Fragments = Candidate.DeriveTopMz(p.Fragments, 4),
                 Run = "Carafe (predicted)",
+                Source = source,
             });
         }
         return candidates;
+    }
+
+    /// <summary>
+    /// Combined DIA-NN + Carafe "backfill" pool. Experimental candidates come
+    /// from the DIA-NN report (tagged <see cref="CandidateSource.Experimental"/>
+    /// via <see cref="Build"/>); predicted candidates come from the Carafe
+    /// library (tagged <see cref="CandidateSource.Predicted"/>). Predicted
+    /// precursors that duplicate a confirmed one on (stripped sequence, charge)
+    /// are dropped, so the scheduler never sees the same target twice. The
+    /// scheduler then schedules the experimental tier to exhaustion before the
+    /// predicted tier competes for leftover budget.
+    /// </summary>
+    /// <param name="parsimony">
+    /// Parsimony assignment built over the UNION of the DIA-NN and Carafe
+    /// peptide->protein maps (see <see cref="MergePeptideProteinMaps"/>) so a
+    /// predicted peptide lands in the same protein group as the confirmed
+    /// evidence and counts toward that group's per-protein cap.
+    /// </param>
+    public static List<Candidate> BuildCombined(
+        IEnumerable<DiannRow> rows,
+        IReadOnlyDictionary<FragmentKey, FragmentIon[]> fragmentsByKey,
+        IEnumerable<CarafePrecursor> carafePrecursors,
+        IReadOnlyDictionary<string, (string Group, string Type)> parsimony,
+        double peakHalfWidthMin = 0.10,
+        PredictedRankingReader.Result? predicted = null,
+        PredictedRankingReader.Result? detectability = null,
+        double minDetectability = 0.0)
+    {
+        var experimental = Build(rows, parsimony, fragmentsByKey);
+        var confirmed = new HashSet<(string, int)>(
+            experimental.Select(c => (c.StrippedSequence, c.PrecursorCharge)));
+
+        var predictedCandidates = BuildFromCarafe(
+            carafePrecursors, parsimony, peakHalfWidthMin,
+            predicted, detectability, minDetectability,
+            source: CandidateSource.Predicted);
+
+        var combined = new List<Candidate>(experimental.Count + predictedCandidates.Count);
+        combined.AddRange(experimental);
+        foreach (var c in predictedCandidates)
+            if (!confirmed.Contains((c.StrippedSequence, c.PrecursorCharge)))
+                combined.Add(c);
+        return combined;
+    }
+
+    /// <summary>
+    /// Union two peptide->proteins maps for a single parsimony run over the
+    /// combined evidence. Protein sets for a shared peptide are merged.
+    /// </summary>
+    public static Dictionary<string, IReadOnlyList<string>> MergePeptideProteinMaps(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> a,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> b)
+    {
+        var merged = new Dictionary<string, HashSet<string>>();
+        void Add(IReadOnlyDictionary<string, IReadOnlyList<string>> src)
+        {
+            foreach (var (peptide, prots) in src)
+            {
+                if (!merged.TryGetValue(peptide, out var set))
+                {
+                    set = new HashSet<string>();
+                    merged[peptide] = set;
+                }
+                foreach (var p in prots) set.Add(p);
+            }
+        }
+        Add(a);
+        Add(b);
+        return merged.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyList<string>)kv.Value.ToList());
     }
 
     /// <summary>
