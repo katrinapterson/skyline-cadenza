@@ -144,6 +144,48 @@ public class PeptideTransitionListBuilderTests
     }
 
     [Fact]
+    public void Build_SkipsHeavyLabeledPrecursors_KeepsLight()
+    {
+        // Heavy isotope-labeled precursors (e.g. PRTC standards) carry the
+        // document's explicit isotope modification, which Skyline's
+        // headless transition-list importer rejects and which - because
+        // the row is used to validate the precursor-m/z column - aborts
+        // the entire import. The builder omits them; they reach the assay
+        // via the registered library instead.
+        var light = Make("PEPTIDER", "PEPTIDER", 2, 400.0, 5.0, "P1",
+            new FragmentIon(200.0, 100.0, 1));
+        var heavy = new Candidate
+        {
+            PrecursorId = "PRTCPEP+2",
+            StrippedSequence = "PRTCPEP",
+            ModifiedSequence = "PRTCPEP",
+            PrecursorCharge = 2,
+            PrecursorMz = 500.0,
+            RtStart = 4.75,
+            RtStop = 5.25,
+            RtApex = 5.0,
+            PrecursorQuantity = 1e6,
+            QValue = 0.001,
+            ProteinQValue = 0.001,
+            Proteotypic = 1,
+            ProteinGroup = "PRTC",
+            PeptideType = "unique",
+            Fragments = new[] { new FragmentIon(250.0, 100.0, 1) },
+            Top4Fragments = Candidate.DeriveTopMz(new[] { new FragmentIon(250.0, 100.0, 1) }, 4),
+            Run = "test",
+            IsotopeLabelType = "heavy",
+        };
+        var cands = new[] { light, heavy };
+        var schedule = OneSlot(cands);
+
+        var csv = PeptideTransitionListBuilder.Build(cands, schedule);
+
+        // Only the light peptide's rows survive; the heavy one contributes none.
+        Assert.Contains("PEPTIDER", csv);
+        Assert.DoesNotContain("PRTCPEP", csv);
+    }
+
+    [Fact]
     public void Build_FragmentlessPeptide_StillEmitsPrecursorIsotopeRows()
     {
         var cands = new[] { Make("NOFRAGS", "NOFRAGS", 2, 400.0, 5.0, "P1") };

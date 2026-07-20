@@ -112,6 +112,7 @@ public static class SkylineLibraryLoader
                 "ProductMz",
                 "ProductCharge",
                 "LibraryIntensity",
+                "IsotopeLabelType",
                 rtColumn,
             },
             Uimode = "proteomic",
@@ -262,6 +263,18 @@ public static class SkylineLibraryLoader
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out double rt);
 
+                    // IsotopeLabelType distinguishes heavy spike-in
+                    // standards (e.g. PRTC) from the endogenous light
+                    // targets. Older Skyline exports may omit the column;
+                    // default to "light" so those paths are unchanged.
+                    string label = "light";
+                    if (colIdx.TryGetValue("IsotopeLabelType", out int labelIdx)
+                        && labelIdx < fields.Length
+                        && !string.IsNullOrWhiteSpace(fields[labelIdx]))
+                    {
+                        label = fields[labelIdx];
+                    }
+
                     var key = (modSeq, charge);
                     if (!buckets.TryGetValue(key, out var acc))
                     {
@@ -272,6 +285,7 @@ public static class SkylineLibraryLoader
                             PrecursorCharge = charge,
                             PrecursorMz = precMz,
                             Rt = rt,
+                            IsotopeLabelType = label,
                         };
                         buckets[key] = acc;
                     }
@@ -370,6 +384,7 @@ public static class SkylineLibraryLoader
                 Fragments = ions,
                 Top4Fragments = Candidate.DeriveTopMz(ions, 4),
                 Run = "Skyline document",
+                IsotopeLabelType = acc.IsotopeLabelType,
             });
         }
 
@@ -528,6 +543,7 @@ public static class SkylineLibraryLoader
         public required int PrecursorCharge { get; init; }
         public required double PrecursorMz { get; init; }
         public required double Rt { get; init; }
+        public required string IsotopeLabelType { get; init; }
         public List<(double mz, double intensity, int charge)> Fragments { get; } = new(12);
     }
 }

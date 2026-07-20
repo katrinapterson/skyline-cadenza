@@ -535,6 +535,16 @@ public partial class MainViewModel : ObservableObject
             // tryptic peptides.
             var csv = PeptideTransitionListBuilder.Build(_candidates, ScheduleResult);
             int rowCount = csv.AsSpan().Count('\n') - 1;
+            // Heavy isotope-labeled precursors (e.g. PRTC standards) are
+            // omitted from the transition list by the builder - Skyline's
+            // headless importer can't apply the document's explicit heavy
+            // label and one such row aborts the whole import. They still
+            // reach the assay as heavy through the registered library.
+            int heavySkipped = scheduledCands.Count(c => !c.IsLightLabel);
+            string heavyNote = heavySkipped > 0
+                ? $" ({heavySkipped:n0} heavy-labeled precursors omitted from the list; "
+                    + "they enter via the registered library)"
+                : string.Empty;
             tlistPath = Path.Combine(Path.GetTempPath(),
                 $"cadenza-targets-{Guid.NewGuid():N}.csv");
             await File.WriteAllTextAsync(tlistPath, csv);
@@ -547,7 +557,7 @@ public partial class MainViewModel : ObservableObject
                 : $"~{etaMin:0.0} min";
             StatusMessage = $"BLIB registered. Importing transition list: "
                 + $"{ScheduleResult.ScheduledIndices.Length:n0} precursors "
-                + $"({rowCount:n0} rows). ETA {etaText}. "
+                + $"({rowCount:n0} rows){heavyNote}. ETA {etaText}. "
                 + "Live progress in Skyline's Immediate Window.";
 
             using var heartbeatCts = new CancellationTokenSource();
@@ -558,6 +568,10 @@ public partial class MainViewModel : ObservableObject
                 tlistOutput = await Task.Run(() => _skylineSession.Execute(c => c.RunCommand(new[]
                 {
                     "--import-transition-list=" + tlistPath,
+                    // Degrade any per-row rejection to a warning instead
+                    // of aborting the whole import, so one unexpected row
+                    // can't discard the entire scheduled assay.
+                    "--ignore-transition-errors",
                 })));
             }
             finally

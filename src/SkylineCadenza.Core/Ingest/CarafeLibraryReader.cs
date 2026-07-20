@@ -214,6 +214,18 @@ public static class CarafeLibraryReader
                 Fragments = ions,
             });
         }
+        // Deterministic output order. `perKey` is a Dictionary keyed on a
+        // FragmentKey (which contains a string), and .NET randomizes string
+        // hashing per process - so enumeration order above changes on every
+        // app launch. The scheduler is order-independent (its peptide
+        // comparator is a total order), but leaving this unsorted would still
+        // make slot ids and exported row order vary run-to-run, so identical
+        // inputs would not produce byte-identical target lists.
+        result.Sort(static (a, b) =>
+        {
+            int c = string.CompareOrdinal(a.ModifiedPeptide, b.ModifiedPeptide);
+            return c != 0 ? c : a.PrecursorCharge.CompareTo(b.PrecursorCharge);
+        });
         return result;
     }
 

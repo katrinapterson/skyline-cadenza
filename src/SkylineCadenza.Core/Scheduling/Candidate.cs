@@ -105,6 +105,25 @@ public sealed class Candidate
     public CandidateSource Source { get; init; } = CandidateSource.Experimental;
 
     /// <summary>
+    /// Isotope label type as reported by Skyline (<c>"light"</c>,
+    /// <c>"heavy"</c>, or a custom heavy-label name). Defaults to
+    /// <c>"light"</c> so every ingest path that doesn't set it (DIA-NN,
+    /// Carafe, tests) is treated as light. Heavy-labeled precursors -
+    /// e.g. spiked PRTC standards - carry the document's explicit isotope
+    /// modification, which Skyline's headless transition-list importer
+    /// rejects ("isotope labeled entry found without matching settings").
+    /// <see cref="Output.PeptideTransitionListBuilder"/> skips non-light
+    /// precursors for that reason; they enter the assay through the
+    /// registered spectral library instead.
+    /// </summary>
+    public string IsotopeLabelType { get; init; } = "light";
+
+    /// <summary>True when this precursor is the unlabeled (light) form.</summary>
+    public bool IsLightLabel =>
+        string.IsNullOrEmpty(IsotopeLabelType)
+        || string.Equals(IsotopeLabelType, "light", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Number of fragments Cadenza keeps per precursor. Set wide enough
     /// to back both the top-4 clash check and the top-6 written into the
     /// assay BLIB without needing to re-ingest when the BLIB writer's

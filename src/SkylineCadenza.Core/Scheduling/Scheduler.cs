@@ -336,7 +336,7 @@ public static class Scheduler
                 int tierX = cx.PeptideType == "unique" ? 0 : cx.PeptideType == "razor" ? 1 : 2;
                 int tierY = cy.PeptideType == "unique" ? 0 : cy.PeptideType == "razor" ? 1 : 2;
                 if (tierX != tierY) return tierX - tierY;
-                return parameters.PeptideRanking switch
+                int cmp = parameters.PeptideRanking switch
                 {
                     PeptidePriority.QValue => cx.QValue.CompareTo(cy.QValue),
                     PeptidePriority.PredictedRanking =>
@@ -344,6 +344,18 @@ public static class Scheduler
                             .CompareTo(cx.PredictedPriority ?? double.NegativeInfinity),
                     _ => cy.PrecursorQuantity.CompareTo(cx.PrecursorQuantity),
                 };
+                if (cmp != 0) return cmp;
+                // Final tiebreak so the comparator is a TOTAL order. Without
+                // it, equal-scoring peptides keep whatever relative order the
+                // (unstable) sort left them in, which depends on the order the
+                // candidate list arrived in - and that order is NOT stable:
+                // CarafeLibraryReader returns candidates in Dictionary
+                // enumeration order, and .NET randomizes string hashing per
+                // process, so it changes on every app launch. The result was a
+                // scheduler that produced a different schedule from identical
+                // inputs across runs whenever scores tied. Ordering by the
+                // unique PrecursorId makes tie resolution reproducible.
+                return string.CompareOrdinal(cx.PrecursorId, cy.PrecursorId);
             });
         }
 

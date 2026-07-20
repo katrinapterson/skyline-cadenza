@@ -187,8 +187,25 @@ Each scheduled precursor produces:
   fragments DIA-NN selects on longer tryptic peptides with
   "no matching product ion".
 
+Heavy isotope-labeled precursors (e.g. spiked PRTC standards) are
+**omitted** from the transition list. Skyline reports a heavy precursor's
+m/z alongside the bare light sequence (the isotope label is not part of
+`PeptideModifiedSequence`), so a naive row pairs a light sequence with a
+heavy m/z. Skyline's headless transition-list importer can't apply the
+document's `explicit_decl` heavy modification ("isotope labeled entry
+found without matching settings") and, because it uses an early row to
+validate the precursor-m/z column, a single such row aborts the whole
+import with the misleading "No valid precursor m/z column found, line 1".
+`SkylineLibraryLoader` captures each precursor's `IsotopeLabelType`, and
+`PeptideTransitionListBuilder` skips any precursor that isn't light. Those
+peptides still reach the assay as heavy through the registered spectral
+library (step 3). The number omitted is reported on the status line.
+
 The CSV is written to `%TEMP%` and imported with
-`RunCommand --import-transition-list=<path>`. The import is slow
+`RunCommand --import-transition-list=<path> --ignore-transition-errors`.
+`--ignore-transition-errors` degrades any remaining per-row rejection to a
+warning rather than aborting the import, so one unexpected row can't
+discard the entire scheduled assay. The import is slow
 (~10 transition rows/sec) because Skyline's `MassListImporter` rebuilds
 the document tree per protein; this is on the Skyline team to address.
 Cadenza shows a heartbeat status every 10 s with the elapsed time and

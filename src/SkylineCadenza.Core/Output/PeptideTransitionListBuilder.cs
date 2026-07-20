@@ -56,6 +56,19 @@ public static class PeptideTransitionListBuilder
             int candIdx = schedule.ScheduledIndices[i];
             int slotId = schedule.ScheduledSlotIds[i];
             var c = candidates[candIdx];
+
+            // Skip heavy isotope-labeled precursors (e.g. spiked PRTC
+            // standards). Skyline's headless transition-list importer
+            // rejects an explicit isotope label it can't match to a
+            // registered modification ("isotope labeled entry found
+            // without matching settings"), and because such a row is
+            // used to validate the precursor-m/z column, a single one
+            // aborts the whole import with the misleading "No valid
+            // precursor m/z column found, line 1". These precursors are
+            // already added to the document as heavy through the
+            // registered spectral library, so we omit them here.
+            if (!c.IsLightLabel) continue;
+
             var slot = slotsById[slotId];
 
             double windowMin = slot.RtStop - slot.RtStart;
