@@ -84,6 +84,12 @@ public partial class MainViewModel : ObservableObject
     // PRM quad isolation width (also the minimum slot width for solo MTM slots).
     [ObservableProperty] private double _prmIsolationWidthTh = 0.7;
 
+    // How isolation windows may grow relative to each other. Legacy keeps the
+    // historical behaviour (and the golden fixtures); Disjoint stops a window
+    // expanding across a clashing precursor and forbids concurrent windows from
+    // overlapping in m/z. See docs/scheduler-window-scoping.md.
+    [ObservableProperty] private WindowPacking _packing = WindowPacking.Legacy;
+
     // Per-slot charge constraint + Thermo CSV NCE.
     [ObservableProperty] private ChargeHandling _chargeHandling = ChargeHandling.SameChargePerSlot;
     [ObservableProperty] private double _normalizedCollisionEnergy = 28.0;
@@ -1270,6 +1276,7 @@ public partial class MainViewModel : ObservableObject
             FiringPadSec = FiringPadSec,
             QValueCutoff = QValueCutoff,
             PrmIsolationWidthTh = PrmIsolationWidthTh,
+            Packing = Packing,
             ChargeHandling = ChargeHandling,
             NormalizedCollisionEnergy = NormalizedCollisionEnergy,
             TargetProteins = targets,
@@ -1305,6 +1312,7 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnPrmIsolationWidthThChanged(double value) => _ = RescheduleAsync();
     partial void OnChargeHandlingChanged(ChargeHandling value) => _ = RescheduleAsync();
+    partial void OnPackingChanged(WindowPacking value) => _ = RescheduleAsync();
     // NormalizedCollisionEnergy is output-only - no reschedule.
     partial void OnMinPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();
     partial void OnMaxPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();

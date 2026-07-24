@@ -103,6 +103,101 @@ public static class Scheduler
             }
         }
 
+        // Slot-aware packing (WindowPacking.Disjoint). Two guards, with
+        // different lifetimes:
+        //
+        //   1. Growth bounds from CLASH BARRIERS. Sourced from the candidate
+        //      POOL, not from the slots built so far - a precursor co-isolates
+        //      whenever it falls inside a firing band, whether or not it ever
+        //      wins a slot. Because the pool is static, the bound a slot gets
+        //      is independent of the order proteins happen to be processed in.
+        //   2. NEIGHBOUR BANDS. Slots appear as scheduling proceeds, so these
+        //      are probed at expansion time rather than cached.
+        bool disjointPacking = parameters.Packing == WindowPacking.Disjoint
+                               && parameters.Mode == AcquisitionMode.Mtm;
+
+        var candByMzBin = new Dictionary<int, List<int>>();
+        if (disjointPacking)
+        {
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                int bin = (int)Math.Floor(candidates[i].PrecursorMz);
+                if (!candByMzBin.TryGetValue(bin, out var list))
+                {
+                    list = new List<int>();
+                    candByMzBin[bin] = list;
+                }
+                list.Add(i);
+            }
+        }
+
+        double prmHalf = parameters.PrmIsolationWidthTh / 2.0;
+        // Furthest a barrier can sit and still be swallowed: the widest the
+        // member centers may span, plus the half-quad the band reaches past
+        // the edge member. Anything beyond this is unreachable, so the scan
+        // stays bounded.
+        double barrierReach =
+            Math.Max(0.0, parameters.IsolationWindowTh - parameters.PrmIsolationWidthTh) + prmHalf;
+
+        // Tighten a slot's growth bounds with the barriers one member
+        // introduces: the nearest co-eluting precursor on each side whose
+        // fragments clash with it. The emitted band reaches prmHalf past the
+        // edge member, so the bound sits half a quad width inside the barrier.
+        // Bounds only ever tighten, so re-running this as members are added is
+        // monotone and order-independent.
+        void TightenBounds(Slot slot, int memberIdx)
+        {
+            if (!disjointPacking) return;
+            var m = candidates[memberIdx];
+            int lo = (int)Math.Floor(m.PrecursorMz - barrierReach);
+            int hi = (int)Math.Floor(m.PrecursorMz + barrierReach);
+            for (int b = lo; b <= hi; b++)
+            {
+                if (!candByMzBin.TryGetValue(b, out var idxs)) continue;
+                foreach (int xi in idxs)
+                {
+                    if (xi == memberIdx || slot.MemberIndices.Contains(xi)) continue;
+                    var x = candidates[xi];
+                    if (Math.Abs(x.PrecursorMz - m.PrecursorMz) > barrierReach) continue;
+                    // Only a precursor that co-elutes with this member can be
+                    // co-isolated with it.
+                    if (!(x.RtStart < m.RtStop && m.RtStart < x.RtStop)) continue;
+                    if (!FragmentClash.AnyWithin(x.Top4Fragments, m.Top4Fragments, parameters.FragmentTolDa))
+                        continue;
+
+                    if (x.PrecursorMz > slot.MzMax)
+                        slot.GrowHi = Math.Min(slot.GrowHi, x.PrecursorMz - prmHalf);
+                    else if (x.PrecursorMz < slot.MzMin)
+                        slot.GrowLo = Math.Max(slot.GrowLo, x.PrecursorMz + prmHalf);
+                    // A barrier already inside [MzMin, MzMax] cannot be excluded
+                    // by any band around these members; nothing to bound.
+                }
+            }
+        }
+
+        // True when a band firing over [rtStart, rtStop] would overlap the band
+        // of a DIFFERENT, concurrently-active slot. Pass selfSid = -1 when
+        // testing a slot that does not exist yet.
+        bool OverlapsOtherSlotBand(int selfSid, double bandLo, double bandHi, double rtStart, double rtStop)
+        {
+            if (!disjointPacking) return false;
+            int lo = (int)Math.Floor(bandLo) - 1;
+            int hi = (int)Math.Floor(bandHi) + 1;
+            for (int b = lo; b <= hi; b++)
+            {
+                if (!slotByMzBin.TryGetValue(b, out var sids)) continue;
+                foreach (int sid in sids)
+                {
+                    if (sid == selfSid) continue;
+                    var s = slots[sid];
+                    double sLo = s.MzMin - prmHalf, sHi = s.MzMax + prmHalf;
+                    if (bandLo < sHi && sLo < bandHi && rtStart < s.RtStop && s.RtStart < rtStop)
+                        return true;
+                }
+            }
+            return false;
+        }
+
         // Read-only feasibility check: true iff `candIndex` could be merged
         // into some existing MTM slot right now without opening a new one.
         // Mirrors the merge-half of TrySchedule and MUST be kept in sync
@@ -141,6 +236,8 @@ public static class Scheduler
                     double newMzMin = Math.Min(slot.MzMin, mz);
                     double newMzMax = Math.Max(slot.MzMax, mz);
                     if (newMzMax - newMzMin > centerSpanBudget) continue;
+                    // Growth bounds: never expand across a clashing precursor.
+                    if (newMzMin < slot.GrowLo || newMzMax > slot.GrowHi) continue;
 
                     double newCoStart = Math.Max(slot.CoStart, rtStart);
                     double newCoStop = Math.Min(slot.CoStop, rtStop);
@@ -163,6 +260,9 @@ public static class Scheduler
                     if (extLoFrom < extLoTo && RangeMax(slotsPerBin, extLoFrom, extLoTo) + 1 > parameters.CycleBudget)
                         continue;
                     if (extHiFrom < extHiTo && RangeMax(slotsPerBin, extHiFrom, extHiTo) + 1 > parameters.CycleBudget)
+                        continue;
+                    if (OverlapsOtherSlotBand(sid, newMzMin - prmHalf, newMzMax + prmHalf,
+                                              newRtStartPad, newRtStopPad))
                         continue;
 
                     return true;
@@ -208,6 +308,8 @@ public static class Scheduler
                         double newMzMin = Math.Min(slot.MzMin, mz);
                         double newMzMax = Math.Max(slot.MzMax, mz);
                         if (newMzMax - newMzMin > centerSpanBudget) continue;
+                        // Growth bounds: never expand across a clashing precursor.
+                        if (newMzMin < slot.GrowLo || newMzMax > slot.GrowHi) continue;
 
                         // Strict co-elution: intersection of unpadded peak
                         // ranges must remain non-empty.
@@ -241,6 +343,9 @@ public static class Scheduler
                             continue;
                         if (extHiFrom < extHiTo && RangeMax(slotsPerBin, extHiFrom, extHiTo) + 1 > parameters.CycleBudget)
                             continue;
+                        if (OverlapsOtherSlotBand(sid, newMzMin - prmHalf, newMzMax + prmHalf,
+                                                  newRtStartPad, newRtStopPad))
+                            continue;
                         if (extLoFrom < extLoTo) RangeAddOne(slotsPerBin, extLoFrom, extLoTo);
                         if (extHiFrom < extHiTo) RangeAddOne(slotsPerBin, extHiFrom, extHiTo);
                         slot.RtStart = newRtStartPad;
@@ -256,6 +361,7 @@ public static class Scheduler
                         slot.Fragments = merged;
                         slot.MemberIndices.Add(candIndex);
                         RegisterSlotMzBins(sid, newMzMin, newMzMax);
+                        TightenBounds(slot, candIndex);
                         return sid;
                     }
                 }
@@ -265,6 +371,10 @@ public static class Scheduler
             var (newA, newB) = RtToBinRange(rtStartPad, rtStopPad);
             if (newA >= newB) return -1;
             if (RangeMax(slotsPerBin, newA, newB) + 1 > parameters.CycleBudget) return -1;
+            // A fresh solo band that would already overlap a concurrent slot's
+            // band cannot be placed disjointly; the caller falls through to
+            // this protein's next candidate.
+            if (OverlapsOtherSlotBand(-1, mz - prmHalf, mz + prmHalf, rtStartPad, rtStopPad)) return -1;
             RangeAddOne(slotsPerBin, newA, newB);
             int newSid = slots.Count;
             var newSlot = new Slot
@@ -281,6 +391,7 @@ public static class Scheduler
             newSlot.MemberIndices.Add(candIndex);
             slots.Add(newSlot);
             RegisterSlotMzBins(newSid, mz, mz);
+            TightenBounds(newSlot, candIndex);
             return newSid;
         }
 
@@ -426,6 +537,200 @@ public static class Scheduler
         var scheduledPerGroup = new Dictionary<string, int>(groupOrder.Count);
         foreach (var g in groupOrder) { scheduledPerGroup[g] = 0; }
         var coveredGroups = new HashSet<string>();
+
+        // Shrink-with-re-absorption (WindowPacking.Disjoint only).
+        //
+        // Greedy slots only ever GROW, so a precursor that cannot merge and
+        // cannot open a disjoint window has nowhere to go and is dropped. This
+        // recovers a slice of those: if the blocking slot has members far
+        // enough away to survive, evict the ones inside the new precursor's
+        // quad width and let the NEW window absorb them as multiplexed members.
+        // They sit within PrmIsolationWidthTh of it, so they are already in its
+        // m/z neighbourhood; most co-elute and don't clash, and ride the same
+        // chimeric scan. Nothing is dropped unless it cannot be re-absorbed AND
+        // its protein would survive the loss.
+        int TryShrinkAndPlace(int candIndex)
+        {
+            if (!disjointPacking) return -1;
+            var prec = candidates[candIndex];
+            if (prec.Top4Fragments.Length == 0) return -1;
+
+            double mz = prec.PrecursorMz;
+            double soloLo = mz - prmHalf, soloHi = mz + prmHalf;
+            double padStart = prec.RtStart - padMin, padStop = prec.RtStop + padMin;
+            double centerSpanBudget =
+                Math.Max(0.0, parameters.IsolationWindowTh - parameters.PrmIsolationWidthTh);
+
+            // Concurrent slots whose band overlaps the prospective solo band.
+            var blockers = new List<int>();
+            for (int b = (int)Math.Floor(soloLo) - 1; b <= (int)Math.Floor(soloHi) + 1; b++)
+            {
+                if (!slotByMzBin.TryGetValue(b, out var sids)) continue;
+                foreach (int sid in sids)
+                {
+                    if (blockers.Contains(sid)) continue;
+                    var s = slots[sid];
+                    if (!(padStart < s.RtStop && s.RtStart < padStop)) continue;
+                    if (soloLo < s.MzMax + prmHalf && s.MzMin - prmHalf < soloHi) blockers.Add(sid);
+                }
+            }
+            if (blockers.Count == 0) return -1;
+
+            // Dry-run the shrink. Every blocker must keep at least one member a
+            // full quad width away, otherwise "shrinking" it means emptying it.
+            var evicted = new List<int>();
+            var shrunk = new Dictionary<int, (List<int> Kept, double MzMin, double MzMax,
+                                              double Co0, double Co1, double P0, double P1)>();
+            foreach (int sid in blockers)
+            {
+                var kept = new List<int>();
+                foreach (int m in slots[sid].MemberIndices)
+                {
+                    if (Math.Abs(candidates[m].PrecursorMz - mz) >= parameters.PrmIsolationWidthTh)
+                        kept.Add(m);
+                    else
+                        evicted.Add(m);
+                }
+                if (kept.Count == 0) return -1;
+
+                double kMin = double.PositiveInfinity, kMax = double.NegativeInfinity;
+                double kCo0 = double.NegativeInfinity, kCo1 = double.PositiveInfinity;
+                double kP0 = double.PositiveInfinity, kP1 = double.NegativeInfinity;
+                foreach (int m in kept)
+                {
+                    var mc = candidates[m];
+                    kMin = Math.Min(kMin, mc.PrecursorMz); kMax = Math.Max(kMax, mc.PrecursorMz);
+                    kCo0 = Math.Max(kCo0, mc.RtStart); kCo1 = Math.Min(kCo1, mc.RtStop);
+                    kP0 = Math.Min(kP0, mc.RtStart - padMin); kP1 = Math.Max(kP1, mc.RtStop + padMin);
+                }
+                shrunk[sid] = (kept, kMin, kMax, kCo0, kCo1, kP0, kP1);
+            }
+            if (evicted.Count == 0) return -1;
+
+            // Re-absorb what we can into the new window.
+            var members = new List<int> { candIndex };
+            var homeless = new List<int>();
+            double winLo = mz, winHi = mz, coStart = prec.RtStart, coStop = prec.RtStop;
+            double winPadStart = padStart, winPadStop = padStop;
+            foreach (int e in evicted)
+            {
+                var ec = candidates[e];
+                double nLo = Math.Min(winLo, ec.PrecursorMz), nHi = Math.Max(winHi, ec.PrecursorMz);
+                double nCo0 = Math.Max(coStart, ec.RtStart), nCo1 = Math.Min(coStop, ec.RtStop);
+                bool fits =
+                    (nHi - nLo) <= centerSpanBudget
+                    && nCo0 < nCo1
+                    && !members.Any(w => FragmentClash.AnyWithin(
+                           ec.Top4Fragments, candidates[w].Top4Fragments, parameters.FragmentTolDa))
+                    && (parameters.ChargeHandling != ChargeHandling.SameChargePerSlot
+                        || ec.PrecursorCharge == prec.PrecursorCharge);
+                if (fits)
+                {
+                    members.Add(e);
+                    winLo = nLo; winHi = nHi; coStart = nCo0; coStop = nCo1;
+                    winPadStart = Math.Min(winPadStart, ec.RtStart - padMin);
+                    winPadStop = Math.Max(winPadStop, ec.RtStop + padMin);
+                }
+                else homeless.Add(e);
+            }
+
+            // Never un-cover a protein to make room.
+            foreach (int h in homeless)
+                if (scheduledPerGroup.TryGetValue(candidates[h].ProteinGroup, out int n) && n <= 1)
+                    return -1;
+
+            // The new window is WIDER than the solo band that found the
+            // blockers, so re-verify the final geometry against every slot -
+            // blockers at their post-shrink size, everything else as-is.
+            double winBandLo = winLo - prmHalf, winBandHi = winHi + prmHalf;
+            for (int sid = 0; sid < slots.Count; sid++)
+            {
+                double sMin, sMax, sRt0, sRt1;
+                if (shrunk.TryGetValue(sid, out var g))
+                {
+                    sMin = g.MzMin; sMax = g.MzMax; sRt0 = g.P0; sRt1 = g.P1;
+                }
+                else
+                {
+                    var s = slots[sid];
+                    if (s.MemberIndices.Count == 0) continue;
+                    sMin = s.MzMin; sMax = s.MzMax; sRt0 = s.RtStart; sRt1 = s.RtStop;
+                }
+                if (!(winPadStart < sRt1 && sRt0 < winPadStop)) continue;
+                if (winBandLo < sMax + prmHalf && sMin - prmHalf < winBandHi) return -1;
+            }
+
+            // Budget for the new window, checked before mutating anything.
+            var (winA, winB) = RtToBinRange(winPadStart, winPadStop);
+            if (winA >= winB) return -1;
+            if (RangeMax(slotsPerBin, winA, winB) + 1 > parameters.CycleBudget) return -1;
+
+            // ---- commit ----
+            foreach (var (sid, g) in shrunk)
+            {
+                var s = slots[sid];
+                var (oldA, oldB) = RtToBinRange(s.RtStart, s.RtStop);
+
+                s.MemberIndices.Clear();
+                var frags = new List<double>();
+                foreach (int m in g.Kept)
+                {
+                    s.MemberIndices.Add(m);
+                    frags.AddRange(candidates[m].Top4Fragments);
+                }
+                frags.Sort();
+                s.MzMin = g.MzMin; s.MzMax = g.MzMax;
+                s.CoStart = g.Co0; s.CoStop = g.Co1;
+                s.RtStart = g.P0; s.RtStop = g.P1;
+                s.Fragments = frags.ToArray();
+                // Growth bounds were derived from members that may now be gone.
+                // Leaving them is safe: they only ever tighten, so a stale bound
+                // is conservative, never permissive.
+
+                // Release the occupancy the slot no longer spans.
+                var (newA2, newB2) = RtToBinRange(s.RtStart, s.RtStop);
+                for (int i = oldA; i < oldB; i++)
+                    if (i < newA2 || i >= newB2) slotsPerBin[i]--;
+            }
+
+            RangeAddOne(slotsPerBin, winA, winB);
+            int sidNew = slots.Count;
+            var win = new Slot
+            {
+                Id = sidNew,
+                MzMin = winLo,
+                MzMax = winHi,
+                RtStart = winPadStart,
+                RtStop = winPadStop,
+                CoStart = coStart,
+                CoStop = coStop,
+            };
+            var wf = new List<double>();
+            foreach (int m in members) { win.MemberIndices.Add(m); wf.AddRange(candidates[m].Top4Fragments); }
+            wf.Sort();
+            win.Fragments = wf.ToArray();
+            slots.Add(win);
+            RegisterSlotMzBins(sidNew, winLo, winHi);
+            foreach (int m in members) TightenBounds(win, m);
+
+            // Re-absorbed members changed slots but stay scheduled; homeless
+            // ones lose their place (their protein keeps another peptide).
+            foreach (int m in members) if (m != candIndex) scheduledToSlot[m] = sidNew;
+            foreach (int h in homeless)
+            {
+                scheduledToSlot.Remove(h);
+                string g = candidates[h].ProteinGroup;
+                if (scheduledPerGroup.TryGetValue(g, out int n)) scheduledPerGroup[g] = n - 1;
+            }
+            return sidNew;
+        }
+
+        // Place a candidate: the normal merge-or-open, then the shrink fallback.
+        int Place(int candIndex)
+        {
+            int sid = TrySchedule(candIndex);
+            return sid >= 0 ? sid : TryShrinkAndPlace(candIndex);
+        }
         // Effective load-up cap by objective:
         //   Balanced         - user's MaxPeptidesPerProtein.
         //   MaximizeProteins - user's MaxPeptidesPerProtein. The cover
@@ -521,7 +826,7 @@ public static class Scheduler
                 {
                     int candIdx = queue[q];
                     if (!CanJoinExistingSlot(candIdx)) continue;
-                    int sid = TrySchedule(candIdx);
+                    int sid = Place(candIdx);
                     if (sid >= 0)
                     {
                         chosenSid = sid;
@@ -556,7 +861,7 @@ public static class Scheduler
                 }
                 if (bestCandIdx >= 0)
                 {
-                    int sid = TrySchedule(bestCandIdx);
+                    int sid = Place(bestCandIdx);
                     if (sid >= 0)
                     {
                         chosenSid = sid;
@@ -572,7 +877,7 @@ public static class Scheduler
                     {
                         int candIdx = queue[q];
                         if (candIdx == bestCandIdx) continue;
-                        int sid = TrySchedule(candIdx);
+                        int sid = Place(candIdx);
                         if (sid >= 0)
                         {
                             chosenSid = sid;
@@ -589,7 +894,7 @@ public static class Scheduler
                 while (cursor < queue.Count)
                 {
                     int candIdx = queue[cursor];
-                    int sid = TrySchedule(candIdx);
+                    int sid = Place(candIdx);
                     cursor++;
                     if (sid >= 0)
                     {
@@ -641,7 +946,7 @@ public static class Scheduler
                         // RT-aware cover may have chosen any position in
                         // the queue without advancing the cursor.
                         if (scheduledToSlot.ContainsKey(candIdx)) continue;
-                        int sid = TrySchedule(candIdx);
+                        int sid = Place(candIdx);
                         if (sid >= 0)
                         {
                             scheduledToSlot[candIdx] = sid;

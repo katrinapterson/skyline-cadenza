@@ -26,6 +26,19 @@ public sealed class Slot
     public double MzMin { get; set; }
     public double MzMax { get; set; }
 
+    /// <summary>
+    /// Hard floor on <see cref="MzMin"/> under
+    /// <see cref="WindowPacking.Disjoint"/>. Set from the nearest co-eluting,
+    /// clashing precursor BELOW this slot in the candidate pool: the emitted
+    /// band reaches <c>PrmIsolationWidthTh / 2</c> past the edge member, so the
+    /// bound sits half a quadrupole width inside the barrier. Unbounded under
+    /// <see cref="WindowPacking.Legacy"/>.
+    /// </summary>
+    public double GrowLo { get; set; } = double.NegativeInfinity;
+
+    /// <summary>Hard ceiling on <see cref="MzMax"/>. See <see cref="GrowLo"/>.</summary>
+    public double GrowHi { get; set; } = double.PositiveInfinity;
+
     /// <summary>Padded firing window start (min).</summary>
     public double RtStart { get; set; }
 

@@ -135,6 +135,14 @@
                 <RadioButton Content="Allow mixed (use slot majority charge)" GroupName="chargeHandling"
                              IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.AllowMixed}}"/>
 
+                <TextBlock Text="Window packing" Margin="0,8,0,2"/>
+                <RadioButton Content="Legacy (windows may overlap)" GroupName="windowPacking"
+                             IsChecked="{Binding Packing, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:WindowPacking.Legacy}}"/>
+                <RadioButton Content="Disjoint (no overlap; never sweep over an interferer)" GroupName="windowPacking"
+                             IsChecked="{Binding Packing, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:WindowPacking.Disjoint}}"/>
+                <TextBlock Text="Disjoint trades protein coverage for clean, narrower windows."
+                           TextWrapping="Wrap" FontSize="11" Opacity="0.7" Margin="0,2,0,0"/>
+
                 <!-- Cycle budget -->
                 <TextBlock Text="Cycle budget" FontWeight="Bold" Margin="0,16,0,4"/>
                 <TextBlock Text="{Binding CycleBudget, StringFormat='Concurrent slots: {0}'}"/>

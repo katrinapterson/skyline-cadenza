@@ -131,6 +131,7 @@ public static class Program
             PeptideRanking = dto.PeptideRanking ?? PeptidePriority.PrecursorQuantity,
             ChargeHandling = dto.ChargeHandling ?? ChargeHandling.SameChargePerSlot,
             NormalizedCollisionEnergy = dto.NormalizedCollisionEnergy ?? 28.0,
+            Packing = dto.Packing ?? WindowPacking.Legacy,
         };
         return p;
     }
@@ -236,6 +237,7 @@ internal sealed class SchedulingParametersDto
     public PeptidePriority? PeptideRanking { get; set; }
     public ChargeHandling? ChargeHandling { get; set; }
     public double? NormalizedCollisionEnergy { get; set; }
+    public WindowPacking? Packing { get; set; }
 }
 
 internal sealed class ScheduleResponse

@@ -97,8 +97,45 @@ public sealed record SchedulingParameters
     /// </summary>
     public CoverageObjective Objective { get; init; } = CoverageObjective.MaximizeProteins;
 
+    /// <summary>
+    /// How MTM isolation windows are allowed to grow relative to each other
+    /// and to precursors they would sweep over. See <see cref="WindowPacking"/>.
+    /// Defaults to <see cref="WindowPacking.Legacy"/> so existing schedules and
+    /// the golden fixtures are unchanged.
+    /// </summary>
+    public WindowPacking Packing { get; init; } = WindowPacking.Legacy;
+
     /// <summary>Convenience accessor: <see cref="FiringPadSec"/> in minutes.</summary>
     public double FiringPadMin => FiringPadSec / 60.0;
+}
+
+/// <summary>
+/// Controls whether a slot's isolation window may expand across precursors it
+/// would co-isolate, and whether two concurrent windows may overlap in m/z.
+/// </summary>
+public enum WindowPacking
+{
+    /// <summary>
+    /// Historical behaviour: each slot grows to cover its own members with no
+    /// awareness of its neighbours. A merge that widens the band can sweep it
+    /// over a precursor that was rejected for clashing (the "illusory
+    /// exclusion" in <c>docs/scheduler-window-scoping.md</c>), and two
+    /// concurrent windows may overlap, double-sampling the precursors between
+    /// them.
+    /// </summary>
+    Legacy,
+
+    /// <summary>
+    /// Slot-aware packing. Every slot carries growth bounds
+    /// (<see cref="Slot.GrowLo"/> / <see cref="Slot.GrowHi"/>) derived from the
+    /// nearest co-eluting, clashing precursor in the candidate pool on each
+    /// side, so a window can never expand across an interferer. Expansions and
+    /// new slots are additionally rejected when the resulting band would
+    /// overlap a concurrently-firing slot's band, so windows never grow into
+    /// one another. Protein-priority order and the per-protein fallback are
+    /// unchanged; the cost is paid in cycle budget, not coverage logic.
+    /// </summary>
+    Disjoint,
 }
 
 public enum AcquisitionMode

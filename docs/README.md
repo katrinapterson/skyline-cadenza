@@ -28,6 +28,13 @@ integration details that don't belong in a development-context file.
   does a Carafe-only run get peptide rankings when Carafe has no
   abundance information?".
 
+- [`scheduler-window-scoping.md`](scheduler-window-scoping.md): known bug -
+  `TrySchedule`'s fragment-clash check is scoped to a slot's members, but
+  the isolation window physically co-isolates everything in its m/z band, so
+  expanding a window can silently re-include a precursor that was rejected
+  for clashing (the "illusory exclusion"). Motivates the window-scoped
+  interference redesign. Guarded by a skipped regression test.
+
 ## Screenshots
 
 `screenshots/` carries the figures referenced from the release notes and
