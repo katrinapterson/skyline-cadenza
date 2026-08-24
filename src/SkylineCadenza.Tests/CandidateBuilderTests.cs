@@ -115,6 +115,80 @@ public class CandidateBuilderTests
         };
 
     [Fact]
+    public void Build_PrefersMeasuredDiannFragmentsOverCarafeOverlay()
+    {
+        // Confirmed peptides must schedule on their MEASURED DIA-NN fragments so
+        // loading a Carafe library cannot move the empirical schedule. A Carafe
+        // overlay is present for this peptide but must be ignored in favour of
+        // the measured fragments.
+        var row = new DiannRow
+        {
+            PrecursorId = "PEPTIDEK+2",
+            ModifiedSequence = "PEPTIDEK",
+            StrippedSequence = "PEPTIDEK",
+            PrecursorCharge = 2,
+            PrecursorMz = 500.0,
+            RtApex = 20.0,
+            RtStart = 19.8,
+            RtStop = 20.2,
+            PrecursorQuantity = 1e6,
+            Proteotypic = 1,
+            ProteinIds = "P1",
+            Genes = "",
+            Run = "run1",
+            QValue = 0.001,
+            ProteinQValue = 0.001,
+            Fragments = new[]
+            {
+                new FragmentIon(200.0, 9, 1),
+                new FragmentIon(300.0, 8, 1),
+                new FragmentIon(400.0, 7, 1),
+            },
+        };
+        var carafeFrags = new Dictionary<FragmentKey, FragmentIon[]>
+        {
+            [new FragmentKey(CarafeKey.FromDiann("PEPTIDEK"), 2)] = new[]
+            {
+                new FragmentIon(600.0, 9, 1),
+                new FragmentIon(700.0, 8, 1),
+            },
+        };
+        var parsimony = new Dictionary<string, (string Group, string Type)>
+        {
+            ["PEPTIDEK"] = ("P1", "unique"),
+        };
+
+        var candidate = Assert.Single(CandidateBuilder.Build(new[] { row }, parsimony, carafeFrags));
+
+        Assert.Contains(200.0, candidate.Top4Fragments);       // measured DIA-NN fragment
+        Assert.DoesNotContain(600.0, candidate.Top4Fragments); // Carafe overlay ignored
+    }
+
+    [Fact]
+    public void Build_FallsBackToCarafeFragmentsWhenDiannHasNone()
+    {
+        // When DIA-NN carries no measured fragments, the Carafe overlay is still
+        // used so the interference check has something to work with.
+        var row = DiannRow("PEPTIDEK", 2, "P1"); // helper sets Fragments = empty
+        var carafeFrags = new Dictionary<FragmentKey, FragmentIon[]>
+        {
+            [new FragmentKey(CarafeKey.FromDiann("PEPTIDEK"), 2)] = new[]
+            {
+                new FragmentIon(600.0, 9, 1),
+                new FragmentIon(700.0, 8, 1),
+            },
+        };
+        var parsimony = new Dictionary<string, (string Group, string Type)>
+        {
+            ["PEPTIDEK"] = ("P1", "unique"),
+        };
+
+        var candidate = Assert.Single(CandidateBuilder.Build(new[] { row }, parsimony, carafeFrags));
+
+        Assert.Contains(600.0, candidate.Top4Fragments); // Carafe fallback used
+    }
+
+    [Fact]
     public void BuildCombined_DedupsPredictedDuplicateOnPeptideAndCharge_KeepsOtherChargeAndNewPeptide()
     {
         // Confirmed by DIA-NN: PEPTIDEK+2.
@@ -146,5 +220,37 @@ public class CandidateBuilderTests
         Assert.DoesNotContain(("PEPTIDEK", 2), predicted); // deduped
         Assert.Contains(("PEPTIDEK", 3), predicted);       // different charge kept
         Assert.Contains(("OTHERPEP", 2), predicted);       // new peptide kept
+    }
+
+    [Fact]
+    public void MapPredictedToExperimentalGroups_routes_by_confirmed_accession_and_parsimonises_the_unseen()
+    {
+        // Confirmed accession map: P1 and P2 both resolve to canonical group P1;
+        // P3 is a distinct confirmed group. A Carafe peptide is routed to the
+        // group of whichever confirmed protein its accessions hit; peptides on
+        // proteins DIA-NN never saw are grouped among themselves.
+        var expAccToGroup = new Dictionary<string, string>
+        {
+            ["P1"] = "P1",
+            ["P2"] = "P1",
+            ["P3"] = "P3",
+        };
+        var carafePepProteins = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["SEENPEP"] = new[] { "P2" },        // -> confirmed group P1, unique
+            ["SPANPEP"] = new[] { "P1", "P3" },  // spans two confirmed groups -> razor
+            ["NEWPEP1"] = new[] { "U1" },        // unseen protein
+            ["NEWPEP2"] = new[] { "U1" },        // unseen, same protein -> shared canon
+        };
+
+        var map = CandidateBuilder.MapPredictedToExperimentalGroups(
+            carafePepProteins, expAccToGroup);
+
+        Assert.Equal(("P1", "unique"), map["SEENPEP"]);
+        Assert.Equal(("P1", "razor"), map["SPANPEP"]); // min of {P1,P3}
+        // Unseen peptides are parsimonised among themselves, not dropped, and do
+        // not borrow a confirmed group.
+        Assert.Equal("U1", map["NEWPEP1"].Group);
+        Assert.Equal("U1", map["NEWPEP2"].Group);
     }
 }

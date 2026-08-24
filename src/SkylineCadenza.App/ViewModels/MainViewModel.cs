@@ -974,12 +974,20 @@ public partial class MainViewModel : ObservableObject
         var carafePrecursors = await Task.Run(() =>
             CarafeLibraryReader.LoadCandidates(CarafeTsvPath!, allowedAccessions));
 
-        // Shared parsimony over the union of DIA-NN + Carafe evidence so a
-        // predicted peptide lands in the same group as its confirmed protein.
-        var pepMap = CandidateBuilder.MergePeptideProteinMaps(
-            DiannParquetReader.BuildPeptideProteinMap(rows),
-            CandidateBuilder.CarafePeptideProteinMap(carafePrecursors));
-        var parsimony = ParsimonyEngine.Assign(pepMap);
+        // Parsimony is run over the DIA-NN evidence ONLY, so the confirmed
+        // grouping and unique/razor classification are identical to a DIA-NN-only
+        // run - the experimental schedule stays locked regardless of the Carafe
+        // library. Predicted (Carafe) peptides are then routed by accession into
+        // whichever confirmed group their protein occupies (or grouped among
+        // themselves when their protein was unseen by DIA-NN). Merging predicted
+        // entries first and confirmed second keeps the confirmed entries
+        // authoritative for any peptide seen by both.
+        var (expParsimony, expAccToGroup) = ParsimonyEngine.AssignWithAccessionGroups(
+            DiannParquetReader.BuildPeptideProteinMap(rows));
+        var predictedParsimony = CandidateBuilder.MapPredictedToExperimentalGroups(
+            CandidateBuilder.CarafePeptideProteinMap(carafePrecursors), expAccToGroup);
+        var parsimony = new Dictionary<string, (string Group, string Type)>(predictedParsimony);
+        foreach (var (peptide, groupType) in expParsimony) parsimony[peptide] = groupType;
         _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
 
         // Optional Bromo within-protein ranking overlay for the predicted tier.
@@ -1020,7 +1028,13 @@ public partial class MainViewModel : ObservableObject
             $"{confirmed:n0} confirmed + {predictedCount:n0} predicted; peak half-width {PeakHalfWidthSec:0} s";
         if (predicted is not null || detectability is not null)
         {
-            PeptideRanking = PeptidePriority.PredictedRanking;
+            // Do NOT overwrite the user's peptide-ranking choice here. In backfill
+            // mode the confirmed tier must keep ranking by the user's evidence
+            // metric (PrecursorQuantity / QValue) so the confirmed schedule is
+            // identical to a backfill-off run; the scheduler ranks the PREDICTED
+            // tier by its detectability / Bromo score independently. (Carafe-only
+            // mode, where every peptide is predicted, still auto-selects
+            // PredictedRanking in LoadFromCarafeOnlyAsync.)
             string src = predicted is not null ? "Bromo ranking" : "Carafe detectability ranking";
             fragSourceLabel += $"; predicted tier ranked by {src}";
         }

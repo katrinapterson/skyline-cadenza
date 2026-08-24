@@ -81,6 +81,32 @@ public class ParsimonyEngineTests
     }
 
     [Fact]
+    public void AssignWithAccessionGroups_maps_active_collapsed_and_subsumed_proteins_to_their_canon()
+    {
+        // P1 {A,B} is subsumed by P2 {A,B,C}. P3 and P4 are indistinguishable
+        // ({D,E}) and collapse to canon P3. The accession map must resolve every
+        // protein - including the removed P1 and the collapsed P4 - to the same
+        // canonical group the peptides use.
+        var input = new Dictionary<string, IReadOnlyList<string>>
+        {
+            ["A"] = new[] { "P1", "P2" },
+            ["B"] = new[] { "P1", "P2" },
+            ["C"] = new[] { "P2" },
+            ["D"] = new[] { "P3", "P4" },
+            ["E"] = new[] { "P3", "P4" },
+        };
+
+        var (peptides, accToGroup) = ParsimonyEngine.AssignWithAccessionGroups(input);
+
+        Assert.Equal("P2", accToGroup["P1"]); // subsumed -> subsumer's canon
+        Assert.Equal("P2", accToGroup["P2"]);
+        Assert.Equal("P3", accToGroup["P3"]);
+        Assert.Equal("P3", accToGroup["P4"]); // indistinguishable -> canon
+        Assert.Equal(peptides["A"].Group, accToGroup["P2"]);
+        Assert.Equal(peptides["D"].Group, accToGroup["P3"]);
+    }
+
+    [Fact]
     public void FindSubsumable_matches_inverted_index_against_a_pairwise_reference()
     {
         // Cross-check the fast inverted-index subsumption finder against a

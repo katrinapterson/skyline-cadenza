@@ -32,14 +32,18 @@ public static class CandidateBuilder
             var carafeKey = new FragmentKey(
                 CarafeKey.FromDiann(row.ModifiedSequence),
                 row.PrecursorCharge);
-            // Prefer the user-supplied Carafe fragments if present.
-            // Otherwise fall back to DIA-NN's per-row Fr.N.Id fragments
-            // (real measured m/z), which gives a useful interference check
-            // without requiring the user to load Carafe.
+            // Confirmed peptides schedule on their MEASURED (DIA-NN Fr.N.Id)
+            // fragments, so the empirical schedule is stable regardless of
+            // whether a Carafe library is loaded - loading Carafe must not move
+            // the confirmed schedule. Carafe's PREDICTED fragments are used only
+            // as a fallback for rows that carry no measured fragments (and for
+            // predicted peptides, via BuildFromCarafe).
             FragmentIon[] fragments =
-                fragmentsByKey.TryGetValue(carafeKey, out var ions)
-                    ? ions
-                    : row.Fragments ?? Array.Empty<FragmentIon>();
+                row.Fragments is { Length: > 0 } measured
+                    ? measured
+                    : fragmentsByKey.TryGetValue(carafeKey, out var ions)
+                        ? ions
+                        : Array.Empty<FragmentIon>();
 
             candidates.Add(new Candidate
             {
@@ -153,10 +157,12 @@ public static class CandidateBuilder
     /// predicted tier competes for leftover budget.
     /// </summary>
     /// <param name="parsimony">
-    /// Parsimony assignment built over the UNION of the DIA-NN and Carafe
-    /// peptide->protein maps (see <see cref="MergePeptideProteinMaps"/>) so a
-    /// predicted peptide lands in the same protein group as the confirmed
-    /// evidence and counts toward that group's per-protein cap.
+    /// Peptide -> (group, type) assignment covering both tiers. To keep the
+    /// confirmed schedule locked, build the DIA-NN peptides' entries from a
+    /// DIA-NN-only parsimony run and route the Carafe peptides onto those groups
+    /// with <see cref="MapPredictedToExperimentalGroups"/> (rather than a single
+    /// parsimony run over the union, which would re-group the confirmed
+    /// evidence). Confirmed entries must win for any peptide seen by both tiers.
     /// </param>
     public static List<Candidate> BuildCombined(
         IEnumerable<DiannRow> rows,
@@ -183,6 +189,50 @@ public static class CandidateBuilder
             if (!confirmed.Contains((c.StrippedSequence, c.PrecursorCharge)))
                 combined.Add(c);
         return combined;
+    }
+
+    /// <summary>
+    /// Build the peptide -> (group, type) map for the predicted (Carafe) tier
+    /// WITHOUT re-running parsimony over the combined evidence, so the confirmed
+    /// (DIA-NN) grouping is never perturbed.
+    ///
+    /// Each Carafe peptide is routed by its protein accessions:
+    /// <list type="bullet">
+    /// <item>If any accession was seen by DIA-NN, the peptide joins that
+    /// experimental canonical group (lexicographically smallest when its
+    /// accessions span several confirmed groups), so it counts toward the same
+    /// per-protein cap as the confirmed peptides there. It is typed
+    /// <c>unique</c> when it maps to a single confirmed group, else
+    /// <c>razor</c>.</item>
+    /// <item>Peptides whose proteins are ALL unseen by DIA-NN (target-list-only
+    /// proteins) are grouped among themselves by a parsimony run over just those
+    /// peptides, so predicted-only proteins still get sensible groups.</item>
+    /// </list>
+    /// </summary>
+    public static Dictionary<string, (string Group, string Type)> MapPredictedToExperimentalGroups(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> carafePeptideProteins,
+        IReadOnlyDictionary<string, string> experimentalAccessionToGroup)
+    {
+        var result = new Dictionary<string, (string Group, string Type)>();
+        var unseen = new Dictionary<string, IReadOnlyList<string>>();
+        foreach (var (peptide, accessions) in carafePeptideProteins)
+        {
+            var seenGroups = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var acc in accessions)
+                if (experimentalAccessionToGroup.TryGetValue(acc, out var g))
+                    seenGroups.Add(g);
+
+            if (seenGroups.Count > 0)
+                result[peptide] = (seenGroups.Min!, seenGroups.Count == 1 ? "unique" : "razor");
+            else
+                unseen[peptide] = accessions;
+        }
+
+        if (unseen.Count > 0)
+            foreach (var (peptide, groupType) in Parsimony.ParsimonyEngine.Assign(unseen))
+                result[peptide] = groupType;
+
+        return result;
     }
 
     /// <summary>

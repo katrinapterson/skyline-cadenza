@@ -51,13 +51,37 @@ public static class Scheduler
         }
 
         double padMin = parameters.FiringPadMin;
+        // Grid origin and bin alignment are derived from the EXPERIMENTAL
+        // candidates only, so the experimental tier's per-bin budget checks -
+        // and therefore the whole experimental schedule - are bit-identical
+        // whether or not a predicted (backfill) tier is present. rtHi is then
+        // extended over ALL candidates so predicted peptides at later RT still
+        // land in a valid bin; predicted peptides earlier than the first
+        // experimental one clamp into bin 0 (RtToBinRange floors at 0), which is
+        // acceptable because backfill rarely precedes the measured gradient. A
+        // pool with no experimental candidates falls back to the full range.
         double rtLo = double.PositiveInfinity;
         double rtHi = double.NegativeInfinity;
+        bool anyExperimental = false;
         foreach (var c in candidates)
         {
+            if (c.Source != CandidateSource.Experimental) continue;
+            anyExperimental = true;
             if (c.RtStart < rtLo) rtLo = c.RtStart;
             if (c.RtStop > rtHi) rtHi = c.RtStop;
         }
+        if (!anyExperimental)
+        {
+            foreach (var c in candidates)
+            {
+                if (c.RtStart < rtLo) rtLo = c.RtStart;
+                if (c.RtStop > rtHi) rtHi = c.RtStop;
+            }
+        }
+        // Extend the upper bound over predicted candidates without moving the
+        // experimental-derived origin.
+        foreach (var c in candidates)
+            if (c.RtStop > rtHi) rtHi = c.RtStop;
         rtLo = rtLo - padMin - 0.1;
         rtHi = rtHi + padMin + 0.1;
         int nBins = (int)Math.Ceiling((rtHi - rtLo) / parameters.RtBinMin);
@@ -116,20 +140,11 @@ public static class Scheduler
         bool disjointPacking = parameters.Packing == WindowPacking.Disjoint
                                && parameters.Mode == AcquisitionMode.Mtm;
 
+        // Clash-barrier pool for TightenBounds. Populated per-tier inside the
+        // scheduling loop below: the experimental tier sees only experimental
+        // barriers (so its slot growth bounds don't depend on the predicted
+        // pool), the predicted tier sees all of them. Empty until then.
         var candByMzBin = new Dictionary<int, List<int>>();
-        if (disjointPacking)
-        {
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                int bin = (int)Math.Floor(candidates[i].PrecursorMz);
-                if (!candByMzBin.TryGetValue(bin, out var list))
-                {
-                    list = new List<int>();
-                    candByMzBin[bin] = list;
-                }
-                list.Add(i);
-            }
-        }
 
         double prmHalf = parameters.PrmIsolationWidthTh / 2.0;
         // Furthest a barrier can sit and still be swallowed: the widest the
@@ -436,106 +451,56 @@ public static class Scheduler
             groupToRanked = keep;
         }
 
-        // Rank peptides within each group: unique-before-razor tier, then by
-        // the user-selected metric (descending quantity / ascending q-value).
-        foreach (var kv in groupToRanked)
+        // Rank two peptides within a group: unique-before-razor tier, then the
+        // given metric (descending quantity / predicted score, ascending
+        // q-value), then PrecursorId for a stable TOTAL order. The ranking
+        // metric is a PARAMETER, not fixed to parameters.PeptideRanking, so the
+        // tier loop can rank the confirmed and predicted tiers by different
+        // metrics - see the ranking selection in that loop.
+        //
+        // The PrecursorId tiebreak matters: equal-scoring peptides would
+        // otherwise keep whatever relative order the (unstable) sort left them
+        // in, which depends on the order the candidate list arrived in - and
+        // that order is NOT stable (CarafeLibraryReader materialises candidates
+        // in Dictionary enumeration order, and .NET randomizes string hashing
+        // per process). Ordering by the unique PrecursorId makes tie resolution
+        // reproducible across app launches.
+        int RankCompare(int x, int y, PeptidePriority ranking)
         {
-            kv.Value.Sort((x, y) =>
+            var cx = candidates[x];
+            var cy = candidates[y];
+            int tierX = cx.PeptideType == "unique" ? 0 : cx.PeptideType == "razor" ? 1 : 2;
+            int tierY = cy.PeptideType == "unique" ? 0 : cy.PeptideType == "razor" ? 1 : 2;
+            if (tierX != tierY) return tierX - tierY;
+            int cmp = ranking switch
             {
-                var cx = candidates[x];
-                var cy = candidates[y];
-                int tierX = cx.PeptideType == "unique" ? 0 : cx.PeptideType == "razor" ? 1 : 2;
-                int tierY = cy.PeptideType == "unique" ? 0 : cy.PeptideType == "razor" ? 1 : 2;
-                if (tierX != tierY) return tierX - tierY;
-                int cmp = parameters.PeptideRanking switch
-                {
-                    PeptidePriority.QValue => cx.QValue.CompareTo(cy.QValue),
-                    PeptidePriority.PredictedRanking =>
-                        (cy.PredictedPriority ?? double.NegativeInfinity)
-                            .CompareTo(cx.PredictedPriority ?? double.NegativeInfinity),
-                    _ => cy.PrecursorQuantity.CompareTo(cx.PrecursorQuantity),
-                };
-                if (cmp != 0) return cmp;
-                // Final tiebreak so the comparator is a TOTAL order. Without
-                // it, equal-scoring peptides keep whatever relative order the
-                // (unstable) sort left them in, which depends on the order the
-                // candidate list arrived in - and that order is NOT stable:
-                // CarafeLibraryReader returns candidates in Dictionary
-                // enumeration order, and .NET randomizes string hashing per
-                // process, so it changes on every app launch. The result was a
-                // scheduler that produced a different schedule from identical
-                // inputs across runs whenever scores tied. Ordering by the
-                // unique PrecursorId makes tie resolution reproducible.
-                return string.CompareOrdinal(cx.PrecursorId, cy.PrecursorId);
-            });
+                PeptidePriority.QValue => cx.QValue.CompareTo(cy.QValue),
+                PeptidePriority.PredictedRanking =>
+                    (cy.PredictedPriority ?? double.NegativeInfinity)
+                        .CompareTo(cx.PredictedPriority ?? double.NegativeInfinity),
+                _ => cy.PrecursorQuantity.CompareTo(cx.PrecursorQuantity),
+            };
+            if (cmp != 0) return cmp;
+            return string.CompareOrdinal(cx.PrecursorId, cy.PrecursorId);
         }
 
-        // Group ordering. The default heuristic (smallest groups first to
-        // cover fragile ones) still applies as a tiebreaker, but the
-        // primary key is the user-selected priority:
-        //
-        //   ProvidedListOrder - target-list members go first in insertion
-        //     order; off-list groups follow in the heuristic order if
-        //     TargetMode = FirstThenFill.
-        //   SummedIntensity   - sum of Precursor.Quantity over each group.
-        //   ProteinQValue     - best (smallest non-NaN) PG.Q.Value.
-        //
-        // FirstThenFill always promotes target-list members to the head of
-        // the order regardless of priority key.
-        var groupSummedIntensity = groupToRanked.ToDictionary(
-            kv => kv.Key,
-            kv => kv.Value.Sum(i => candidates[i].PrecursorQuantity));
-        var groupBestQ = groupToRanked.ToDictionary(
-            kv => kv.Key,
-            kv =>
-            {
-                double best = double.PositiveInfinity;
-                foreach (var i in kv.Value)
-                {
-                    double pq = candidates[i].ProteinQValue;
-                    if (!double.IsNaN(pq) && pq < best) best = pq;
-                }
-                return best;
-            });
-
+        // Target-list rank is tier-independent (a group is on the user's target
+        // list or it isn't). The rest of the group ordering - priority metric
+        // and the smallest-group tiebreaker - is computed PER TIER inside the
+        // scheduling loop below, over that tier's candidates only, so the
+        // experimental tier orders proteins exactly as it would with no
+        // predicted pool present.
         int TargetRank(string group)
         {
             if (!hasTargets) return 0;
             return IsTargetGroup(group) ? 0 : 1;
         }
 
-        int PriorityRank(string group)
-        {
-            return parameters.ProteinRanking switch
-            {
-                ProteinPriority.SummedIntensity =>
-                    -(int)Math.Min(groupSummedIntensity[group] / 1e3, int.MaxValue),
-                ProteinPriority.ProteinQValue =>
-                    (int)Math.Min(groupBestQ[group] * 1e6, int.MaxValue),
-                ProteinPriority.ProvidedListOrder =>
-                    // Without a positional input we treat it as alphabetical;
-                    // the UI passes targets as an ordered list and that order
-                    // is preserved by the in-target / out-of-target split.
-                    0,
-                _ => 0,
-            };
-        }
-
-        var groupOrder = groupToRanked.Keys.ToList();
-        groupOrder.Sort((g1, g2) =>
-        {
-            int t = TargetRank(g1).CompareTo(TargetRank(g2));
-            if (t != 0) return t;
-            int p = PriorityRank(g1).CompareTo(PriorityRank(g2));
-            if (p != 0) return p;
-            int c = groupToRanked[g1].Count.CompareTo(groupToRanked[g2].Count);
-            if (c != 0) return c;
-            return string.CompareOrdinal(g1, g2);
-        });
+        var allGroups = groupToRanked.Keys.ToList();
 
         var scheduledToSlot = new Dictionary<int, int>();
-        var scheduledPerGroup = new Dictionary<string, int>(groupOrder.Count);
-        foreach (var g in groupOrder) { scheduledPerGroup[g] = 0; }
+        var scheduledPerGroup = new Dictionary<string, int>(allGroups.Count);
+        foreach (var g in allGroups) { scheduledPerGroup[g] = 0; }
         var coveredGroups = new HashSet<string>();
 
         // Shrink-with-re-absorption (WindowPacking.Disjoint only).
@@ -575,6 +540,20 @@ public static class Scheduler
                 }
             }
             if (blockers.Count == 0) return -1;
+
+            // Locked experimental tier: a predicted candidate may never shrink,
+            // evict, or re-geometry a slot that holds an experimental member.
+            // Shrink only ever rearranges predicted-only slots. During the
+            // experimental tier the placing candidate is itself experimental, so
+            // this is a no-op and the published shrink behaviour (and the golden
+            // fixtures) are unchanged.
+            if (prec.Source == CandidateSource.Predicted)
+            {
+                foreach (int sid in blockers)
+                    if (slots[sid].MemberIndices.Any(
+                            m => candidates[m].Source == CandidateSource.Experimental))
+                        return -1;
+            }
 
             // Dry-run the shrink. Every blocker must keep at least one member a
             // full quad width away, otherwise "shrinking" it means emptying it.
@@ -755,12 +734,38 @@ public static class Scheduler
         // Partition each group's ranked queue by source tier, preserving the
         // within-group sort. Predicted candidates land in a separate queue so
         // they only compete for budget after the experimental tier is done.
-        Dictionary<string, List<int>> QueuesForTier(CandidateSource src) =>
-            groupOrder.ToDictionary(
+        // Per-tier queues, each sorted by that tier's own ranking metric. The
+        // confirmed tier is ranked by real evidence (quantity / q-value) and the
+        // predicted tier by its predicted score - see the ranking selection in
+        // the tier loop.
+        Dictionary<string, List<int>> QueuesForTier(CandidateSource src, PeptidePriority ranking) =>
+            allGroups.ToDictionary(
                 g => g,
-                g => groupToRanked[g].Where(i => candidates[i].Source == src).ToList());
+                g =>
+                {
+                    var list = groupToRanked[g].Where(i => candidates[i].Source == src).ToList();
+                    list.Sort((x, y) => RankCompare(x, y, ranking));
+                    return list;
+                });
 
         bool useLookAhead = parameters.Objective != CoverageObjective.Balanced;
+
+        // True when some Experimental-tagged candidate carries a predicted score.
+        // This is the Carafe-ONLY pool (predicted peptides tagged Experimental by
+        // default, WITH a detectability / Bromo score): there PredictedRanking is
+        // meaningful for the experimental tier. In the DIA-NN + Carafe backfill
+        // pool the confirmed peptides have no score, so the experimental tier must
+        // not rank by PredictedRanking. Distinguishes the two.
+        bool experimentalHasPredictedScore = false;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (candidates[i].Source == CandidateSource.Experimental
+                && candidates[i].PredictedPriority is not null)
+            {
+                experimentalHasPredictedScore = true;
+                break;
+            }
+        }
 
         // Two-tier scheduling. Schedule every Experimental (measured) candidate
         // first via the full cover + load-up, then let Predicted (Carafe
@@ -773,8 +778,98 @@ public static class Scheduler
         // identical to before - this is what preserves the golden fixtures.
         foreach (var tier in new[] { CandidateSource.Experimental, CandidateSource.Predicted })
         {
-            var queues = QueuesForTier(tier);
-            var cursors = groupOrder.ToDictionary(g => g, _ => 0);
+            // Tier-aware peptide ranking. The two tiers rank by DIFFERENT metrics:
+            //
+            //  - Predicted tier: always its predicted score (Carafe detectability
+            //    / Bromo). This is independent of the confirmed tier's metric, so
+            //    enabling backfill never has to change - and thus never disturbs -
+            //    the confirmed peptides' ranking.
+            //  - Confirmed tier: the user's chosen evidence metric
+            //    (PrecursorQuantity or QValue), so the confirmed schedule is
+            //    identical to a backfill-off run. If that metric is somehow
+            //    PredictedRanking while the confirmed peptides carry no predicted
+            //    score (real DIA-NN targets), fall back to PrecursorQuantity so
+            //    they aren't collapsed to a PrecursorId tie. A Carafe-only pool
+            //    tags its predicted peptides Experimental but DOES give them
+            //    scores, so it keeps PredictedRanking (experimentalHasPredictedScore).
+            var tierRanking =
+                tier == CandidateSource.Predicted
+                    ? PeptidePriority.PredictedRanking
+                : parameters.PeptideRanking == PeptidePriority.PredictedRanking
+                        && !experimentalHasPredictedScore
+                    ? PeptidePriority.PrecursorQuantity
+                    : parameters.PeptideRanking;
+            var queues = QueuesForTier(tier, tierRanking);
+            var cursors = allGroups.ToDictionary(g => g, _ => 0);
+
+            // Rebuild the disjoint-packing clash-barrier pool for this tier.
+            // Experimental tier: only experimental precursors can bound an
+            // experimental slot's growth, so the bounds (and the schedule) don't
+            // depend on the predicted pool. Predicted tier: every precursor is a
+            // real interferer for a predicted slot, so the pool is the full set.
+            if (disjointPacking)
+            {
+                candByMzBin.Clear();
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    if (tier == CandidateSource.Experimental
+                        && candidates[i].Source != CandidateSource.Experimental) continue;
+                    int bin = (int)Math.Floor(candidates[i].PrecursorMz);
+                    if (!candByMzBin.TryGetValue(bin, out var list))
+                    {
+                        list = new List<int>();
+                        candByMzBin[bin] = list;
+                    }
+                    list.Add(i);
+                }
+            }
+
+            // Per-tier group ordering. Priority metric (summed intensity / best
+            // q-value) and the smallest-group tiebreaker are computed over THIS
+            // tier's candidates only, so the experimental tier visits proteins in
+            // exactly the order it would with no predicted pool present. The
+            // predicted tier ranks over its own candidates for the same reason it
+            // schedules last: it only ever fills leftover budget.
+            var tierSummed = new Dictionary<string, double>(allGroups.Count);
+            var tierBestQ = new Dictionary<string, double>(allGroups.Count);
+            foreach (var g in allGroups)
+            {
+                double summed = 0.0;
+                double bestQ = double.PositiveInfinity;
+                foreach (var i in queues[g])
+                {
+                    summed += candidates[i].PrecursorQuantity;
+                    double pq = candidates[i].ProteinQValue;
+                    if (!double.IsNaN(pq) && pq < bestQ) bestQ = pq;
+                }
+                tierSummed[g] = summed;
+                tierBestQ[g] = bestQ;
+            }
+
+            int PriorityRank(string group) => parameters.ProteinRanking switch
+            {
+                ProteinPriority.SummedIntensity =>
+                    -(int)Math.Min(tierSummed[group] / 1e3, int.MaxValue),
+                ProteinPriority.ProteinQValue =>
+                    (int)Math.Min(tierBestQ[group] * 1e6, int.MaxValue),
+                // Without a positional input we treat it as alphabetical; the UI
+                // passes targets as an ordered list and that order is preserved
+                // by the in-target / out-of-target split.
+                ProteinPriority.ProvidedListOrder => 0,
+                _ => 0,
+            };
+
+            var groupOrder = allGroups.ToList();
+            groupOrder.Sort((g1, g2) =>
+            {
+                int t = TargetRank(g1).CompareTo(TargetRank(g2));
+                if (t != 0) return t;
+                int p = PriorityRank(g1).CompareTo(PriorityRank(g2));
+                if (p != 0) return p;
+                int c = queues[g1].Count.CompareTo(queues[g2].Count);
+                if (c != 0) return c;
+                return string.CompareOrdinal(g1, g2);
+            });
 
         // Pass 1: cover one peptide per group. Cover-pass strategy is
         // selected by Objective:

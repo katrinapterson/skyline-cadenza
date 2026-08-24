@@ -14,7 +14,8 @@ public class SchedulerTests
         double quantity = 1e6,
         double[]? fragments = null,
         double? predicted = null,
-        CandidateSource source = CandidateSource.Experimental)
+        CandidateSource source = CandidateSource.Experimental,
+        double qValue = 0.001)
     {
         // Synthesise FragmentIon entries from the supplied mz array.
         // Intensities are assigned descending so the input order matches
@@ -35,7 +36,7 @@ public class SchedulerTests
             RtApex = (rtStart + rtStop) / 2.0,
             PrecursorQuantity = quantity,
             PredictedPriority = predicted,
-            QValue = 0.001,
+            QValue = qValue,
             ProteinQValue = 0.001,
             Proteotypic = 1,
             ProteinGroup = group,
@@ -642,5 +643,159 @@ public class SchedulerTests
         Assert.Equal(2, result.ProteinGroupsCovered);
         var scheduled = result.ScheduledIndices.Select(i => cands[i]).ToList();
         Assert.Contains(scheduled, c => c.ProteinGroup == "G2" && c.Source == CandidateSource.Predicted);
+    }
+
+    [Fact]
+    public void Scheduler_ExperimentalCoreUnchangedWhenBackfillReordersProteins()
+    {
+        // The experimental tier must schedule identically whether or not a
+        // predicted backfill tier is present. Here G1's confirmed peptide
+        // outweighs G2's confirmed peptide, so with only one concurrent slot G1
+        // wins coverage. G2 also carries a high-intensity PREDICTED peptide: if
+        // predicted candidates were allowed to inflate G2's summed intensity, the
+        // protein order would flip and G2 would steal the slot - overwriting the
+        // empirical schedule. The lock keeps the experimental core fixed.
+        var expOnly = new[]
+        {
+            Make("G1.exp", 500.0, 5.0, 5.4, "G1", quantity: 9e6),
+            Make("G2.exp", 700.0, 5.0, 5.4, "G2", quantity: 6e6),
+        };
+        var withBackfill = new[]
+        {
+            Make("G1.exp", 500.0, 5.0, 5.4, "G1", quantity: 9e6),
+            Make("G2.exp", 700.0, 5.0, 5.4, "G2", quantity: 6e6),
+            Make("G2.pred", 900.0, 5.0, 5.4, "G2", quantity: 20e6,
+                source: CandidateSource.Predicted),
+        };
+
+        var p = new SchedulingParameters { CycleBudget = 1 };
+        var a = Scheduler.Run(expOnly, p);
+        var b = Scheduler.Run(withBackfill, p);
+
+        string[] ExpCore(Candidate[] cands, ScheduleResult r) =>
+            r.ScheduledIndices
+                .Where(i => cands[i].Source == CandidateSource.Experimental)
+                .Select(i => cands[i].PrecursorId)
+                .OrderBy(s => s)
+                .ToArray();
+
+        var coreA = ExpCore(expOnly, a);
+        var coreB = ExpCore(withBackfill, b);
+        Assert.Equal(new[] { "G1.exp" }, coreA);
+        Assert.Equal(coreA, coreB); // backfill did not overwrite the empirical core
+    }
+
+    [Fact]
+    public void Scheduler_ConfirmedTierIgnoresPredictedRankingMetric()
+    {
+        // The app flips PeptideRanking to PredictedRanking whenever a Carafe
+        // detectability / Bromo overlay is loaded with backfill. Confirmed
+        // peptides carry no PredictedPriority, so ranking THEM by it would
+        // collapse them to a PrecursorId tie and pick a different top-N under the
+        // per-protein cap. The confirmed tier must keep ranking by
+        // PrecursorQuantity so its schedule matches a backfill-off run.
+        //
+        // exp3 has the lexicographically-smallest PrecursorId but the lowest
+        // quantity: under a raw PredictedRanking sort (all confirmed tie at
+        // null, tie-broken by PrecursorId) exp3 would win the cap over exp1;
+        // under quantity it must not.
+        var expOnly = new[]
+        {
+            Make("Zexp1", 500.0, 1.0, 1.4, "G1", quantity: 9e6),
+            Make("Yexp2", 510.0, 2.0, 2.4, "G1", quantity: 8e6),
+            Make("Aexp3", 520.0, 3.0, 3.4, "G1", quantity: 1e6),
+        };
+        var combined = new[]
+        {
+            Make("Zexp1", 500.0, 1.0, 1.4, "G1", quantity: 9e6),
+            Make("Yexp2", 510.0, 2.0, 2.4, "G1", quantity: 8e6),
+            Make("Aexp3", 520.0, 3.0, 3.4, "G1", quantity: 1e6),
+            Make("G1pred", 530.0, 4.0, 4.4, "G1", quantity: 5e6, predicted: 0.99,
+                source: CandidateSource.Predicted),
+        };
+
+        var off = new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 2,
+            PeptideRanking = PeptidePriority.PrecursorQuantity, // backfill-off default
+        };
+        var on = off with { PeptideRanking = PeptidePriority.PredictedRanking }; // app's backfill flip
+
+        var rOff = Scheduler.Run(expOnly, off);
+        var rOn = Scheduler.Run(combined, on);
+
+        var coreOff = rOff.ScheduledIndices.Select(i => expOnly[i].PrecursorId)
+            .OrderBy(s => s).ToArray();
+        var coreOn = rOn.ScheduledIndices
+            .Where(i => combined[i].Source == CandidateSource.Experimental)
+            .Select(i => combined[i].PrecursorId).OrderBy(s => s).ToArray();
+
+        Assert.Equal(new[] { "Yexp2", "Zexp1" }, coreOff); // top-2 by quantity, not exp3
+        Assert.Equal(coreOff, coreOn); // backfill flip to PredictedRanking did not move the core
+    }
+
+    [Fact]
+    public void Scheduler_ConfirmedTierKeepsUserRankingIndependentOfPredictedTier()
+    {
+        // Enabling backfill must not change the confirmed peptides' ranking. The
+        // user ranks confirmed peptides by QValue, which disagrees with intensity:
+        // exp_lowq has the best (smallest) q-value but low intensity. With Max=1
+        // the confirmed tier keeps exp_lowq (the QValue winner), NOT exp_hiq (the
+        // intensity winner) - proving the confirmed tier ranks by the user's
+        // metric, not by PredictedRanking or a PrecursorQuantity fallback. The
+        // predicted tier meanwhile backfills, ranked by its own detectability.
+        var cands = new[]
+        {
+            Make("G1.exp_lowq", 500.0, 1.0, 1.4, "G1", quantity: 1e6, qValue: 0.0001),
+            Make("G1.exp_hiq",  510.0, 2.0, 2.4, "G1", quantity: 9e6, qValue: 0.05),
+            Make("G2.pred", 800.0, 8.0, 8.4, "G2", predicted: 0.99,
+                source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 1,
+            PeptideRanking = PeptidePriority.QValue,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Contains("G1.exp_lowq", scheduled);       // QValue winner kept
+        Assert.DoesNotContain("G1.exp_hiq", scheduled);  // not the intensity winner
+        Assert.Contains("G2.pred", scheduled);           // predicted still backfills
+    }
+
+    [Fact]
+    public void Scheduler_PredictedCannotShrinkOutExperimentalMember()
+    {
+        // Disjoint packing: a predicted precursor sits within a quad width of a
+        // multiplexed experimental slot and cannot open its own window (its band
+        // overlaps the slot's) or merge (its fragments clash). The only way in
+        // would be to shrink the slot and evict the co-isolated experimental
+        // member - which the locked experimental tier forbids. The predicted
+        // target is dropped; both experimental members stay put.
+        var cands = new[]
+        {
+            Make("exp1", 500.0, 5.0, 5.4, "G1", quantity: 9e6,
+                fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("exp2", 501.0, 5.0, 5.4, "G1", quantity: 8e6,
+                fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+            Make("pred", 500.2, 5.0, 5.4, "G2", quantity: 20e6,
+                fragments: new[] { 100.0, 200.0, 300.0, 400.0 },
+                source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 5,
+            FragmentTolDa = 0.5,
+            Packing = WindowPacking.Disjoint,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Contains("exp1", scheduled);
+        Assert.Contains("exp2", scheduled);
+        Assert.DoesNotContain("pred", scheduled);
     }
 }

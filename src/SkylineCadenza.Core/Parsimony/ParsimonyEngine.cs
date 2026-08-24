@@ -36,6 +36,19 @@ public static class ParsimonyEngine
     /// </summary>
     public static Dictionary<string, (string Group, string Type)> Assign(
         IReadOnlyDictionary<string, IReadOnlyList<string>> peptideToProteins)
+        => AssignWithAccessionGroups(peptideToProteins).Peptides;
+
+    /// <summary>
+    /// Same assignment as <see cref="Assign"/>, but also returns a
+    /// protein-accession -> canonical-group map covering every protein in the
+    /// input (active, indistinguishable, and subsumed). Used by the DIA-NN +
+    /// Carafe backfill path to route predicted peptides into the SAME canonical
+    /// group their confirmed protein landed in - without re-running parsimony
+    /// over the combined evidence, which would perturb the confirmed grouping.
+    /// </summary>
+    public static (Dictionary<string, (string Group, string Type)> Peptides,
+                   IReadOnlyDictionary<string, string> AccessionToGroup) AssignWithAccessionGroups(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> peptideToProteins)
     {
         // peptide -> set of proteins, protein -> set of peptides
         var pepToProts = new Dictionary<string, HashSet<string>>(peptideToProteins.Count);
@@ -154,7 +167,29 @@ public static class ParsimonyEngine
             foreach (var pep in peps)
                 result[pep] = (canon, "razor");
         }
-        return result;
+
+        // Protein-accession -> canonical group, for EVERY input protein. Active
+        // proteins map to the canon of their fingerprint (identical-peptide-set)
+        // collapse; subsumed proteins follow the subsumption chain to an active
+        // protein and inherit its canon. Same canon strings the peptide result
+        // uses, so a predicted peptide routed by accession lands in exactly the
+        // group its confirmed protein occupies.
+        var accessionToGroup = new Dictionary<string, string>();
+        foreach (var members in fingerprintToProteins.Values)
+        {
+            string canon = members.Min(StringComparer.Ordinal)!;
+            foreach (var m in members) accessionToGroup[m] = canon;
+        }
+        foreach (var protA in subsumed.Keys)
+        {
+            string b = subsumed[protA];
+            var guard = new HashSet<string> { protA };
+            while (subsumed.TryGetValue(b, out var next) && guard.Add(b)) b = next;
+            if (accessionToGroup.TryGetValue(b, out var canon))
+                accessionToGroup[protA] = canon;
+        }
+
+        return (result, accessionToGroup);
     }
 
     /// <summary>
