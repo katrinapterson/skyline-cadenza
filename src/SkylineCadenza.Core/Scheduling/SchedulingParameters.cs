@@ -68,6 +68,29 @@ public sealed record SchedulingParameters
     /// <summary>Maximum peptides scheduled per protein group.</summary>
     public int MaxPeptidesPerProtein { get; init; } = 5;
 
+    /// <summary>
+    /// Rank cap: only the top N candidates of each protein group are ELIGIBLE
+    /// for scheduling. 0 (the default) means no cap, which is what keeps every
+    /// existing schedule and the golden fixtures unchanged.
+    ///
+    /// The cap counts PRECURSORS, not distinct sequences: a peptide present at
+    /// two charge states consumes two of the N. Ranking is whatever
+    /// <see cref="PeptideRanking"/> selects (quantity, q-value, or predicted
+    /// score), applied after the unique-before-razor tier, so the knob works
+    /// for every peptide-priority option. It is applied PER SOURCE TIER over
+    /// that tier's own ranking metric, so in DIA-NN + Carafe backfill mode the
+    /// confirmed tier keeps its top N by evidence and the predicted tier keeps
+    /// its top N by predicted score, with neither tier's cap perturbing the
+    /// other.
+    ///
+    /// This truncates the candidate pool, so it also feeds the protein-ordering
+    /// metrics (summed intensity / best q-value are computed over the capped
+    /// queue) and the smallest-group tiebreaker. Distinct from
+    /// <see cref="MaxPeptidesPerProtein"/>, which caps how many of the eligible
+    /// peptides actually get scheduled.
+    /// </summary>
+    public int PeptideRankCap { get; init; } = 0;
+
     /// <summary>How to order the protein groups going into the assay.</summary>
     public ProteinPriority ProteinRanking { get; init; } = ProteinPriority.SummedIntensity;
 

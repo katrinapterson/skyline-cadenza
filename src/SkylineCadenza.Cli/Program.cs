@@ -127,6 +127,7 @@ public static class Program
             QValueCutoff = dto.QValueCutoff ?? 0.01,
             MinPeptidesPerProtein = dto.MinPeptidesPerProtein ?? 1,
             MaxPeptidesPerProtein = dto.MaxPeptidesPerProtein ?? 5,
+            PeptideRankCap = dto.PeptideRankCap ?? 0,
             ProteinRanking = dto.ProteinRanking ?? ProteinPriority.SummedIntensity,
             PeptideRanking = dto.PeptideRanking ?? PeptidePriority.PrecursorQuantity,
             ChargeHandling = dto.ChargeHandling ?? ChargeHandling.SameChargePerSlot,
@@ -233,6 +234,7 @@ internal sealed class SchedulingParametersDto
     public double? QValueCutoff { get; set; }
     public int? MinPeptidesPerProtein { get; set; }
     public int? MaxPeptidesPerProtein { get; set; }
+    public int? PeptideRankCap { get; set; }
     public ProteinPriority? ProteinRanking { get; set; }
     public PeptidePriority? PeptideRanking { get; set; }
     public ChargeHandling? ChargeHandling { get; set; }

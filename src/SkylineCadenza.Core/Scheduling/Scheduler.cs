@@ -738,6 +738,17 @@ public static class Scheduler
         // confirmed tier is ranked by real evidence (quantity / q-value) and the
         // predicted tier by its predicted score - see the ranking selection in
         // the tier loop.
+        //
+        // PeptideRankCap truncates each tier's queue to its top N after the
+        // sort, so only the best-ranked N precursors of a group are eligible at
+        // all. Because it happens here, the cap applies to whatever metric this
+        // tier ranks by (so it works for every PeptideRanking option), is scoped
+        // to one tier (the confirmed tier's cap is unaffected by the predicted
+        // pool and vice versa), and feeds the protein ordering and cover /
+        // load-up passes from the same capped list. Cap 0 = uncapped, which is
+        // the default and leaves existing schedules bit-identical.
+        int rankCap = parameters.PeptideRankCap > 0 ? parameters.PeptideRankCap : int.MaxValue;
+
         Dictionary<string, List<int>> QueuesForTier(CandidateSource src, PeptidePriority ranking) =>
             allGroups.ToDictionary(
                 g => g,
@@ -745,6 +756,7 @@ public static class Scheduler
                 {
                     var list = groupToRanked[g].Where(i => candidates[i].Source == src).ToList();
                     list.Sort((x, y) => RankCompare(x, y, ranking));
+                    if (list.Count > rankCap) list.RemoveRange(rankCap, list.Count - rankCap);
                     return list;
                 });
 

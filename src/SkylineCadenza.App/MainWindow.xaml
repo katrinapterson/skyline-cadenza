@@ -170,6 +170,9 @@
                     <sched:PeptidePriority>QValue</sched:PeptidePriority>
                     <sched:PeptidePriority>PredictedRanking</sched:PeptidePriority>
                 </ComboBox>
+                <TextBlock Text="{Binding PeptideRankCap, StringFormat='Rank cap: top {0} per protein (0 = no cap)'}" Margin="0,8,0,0"
+                           ToolTip="Only the top N precursors of each protein - ranked by the peptide ranking above - are eligible for scheduling at all. Counts precursors, so a peptide at two charge states uses two of the N. In backfill mode the cap is applied separately to the confirmed tier (by its evidence metric) and the predicted tier (by its predicted score). Distinct from the maximum above, which caps how many eligible peptides actually get scheduled."/>
+                <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeptideRankCap}"/>
 
                 <!-- Library filter -->
                 <TextBlock Text="Library filter" FontWeight="Bold" Margin="0,16,0,4"/>

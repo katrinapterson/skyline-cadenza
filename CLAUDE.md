@@ -83,6 +83,8 @@ The three `CoverageObjective` values bundle the cover-pass strategy and the load
 
 `SchedulingParameters` no longer carries `EnableLoadBalancing` or `RtAwareCoverSelection` toggles; the objective alone determines those behaviors. If you need exact published-webinar behavior, pick `Balanced`. If you want to A/B against the previous default ("look-ahead + round-robin to Max"), that combination isn't available as a single objective — `MaximizeProteins` is the look-ahead path and `Balanced` is the reactive path with round-robin load-up.
 
+`PeptideRankCap` (0 = off) is a POOL filter, not a scheduling cap: `QueuesForTier` truncates each protein group's ranked queue to the top N after sorting, so capped-out peptides are invisible to the cover pass, the load-up pass, and the tier's protein-ordering metrics (`tierSummed` / `tierBestQ` and the smallest-group tiebreaker). Because the truncation happens inside `QueuesForTier` it automatically follows whatever metric that tier ranks by, which is what makes it work for every `PeptidePriority` and keeps the two tiers' caps independent. It counts precursors, so one peptide at two charge states spends two of the N.
+
 `MaxPeptidesPerProtein` and `MinPeptidesPerProtein` interact with the objective via the load-up cap above; cover-pass behavior is identical regardless of these knobs. If a user reports "changing max doesn't change protein coverage," that is expected because the cover pass alone sets coverage; Max only changes per-protein depth in pass 2.
 
 ## Code Style

@@ -104,6 +104,13 @@ public partial class MainViewModel : ObservableObject
     // Per-protein bounds + priority knobs
     [ObservableProperty] private int _minPeptidesPerProtein = 1;
     [ObservableProperty] private int _maxPeptidesPerProtein = 5;
+
+    /// <summary>
+    /// Only the top N precursors of each protein group (by the active
+    /// <see cref="PeptideRanking"/>, per source tier) are eligible for
+    /// scheduling. 0 = no cap.
+    /// </summary>
+    [ObservableProperty] private int _peptideRankCap;
     [ObservableProperty] private ProteinPriority _proteinRanking = ProteinPriority.SummedIntensity;
     [ObservableProperty] private PeptidePriority _peptideRanking = PeptidePriority.PrecursorQuantity;
 
@@ -1297,6 +1304,7 @@ public partial class MainViewModel : ObservableObject
             TargetMode = TargetMode,
             MinPeptidesPerProtein = MinPeptidesPerProtein,
             MaxPeptidesPerProtein = MaxPeptidesPerProtein,
+            PeptideRankCap = PeptideRankCap,
             ProteinRanking = ProteinRanking,
             PeptideRanking = PeptideRanking,
         };
@@ -1330,6 +1338,7 @@ public partial class MainViewModel : ObservableObject
     // NormalizedCollisionEnergy is output-only - no reschedule.
     partial void OnMinPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();
     partial void OnMaxPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();
+    partial void OnPeptideRankCapChanged(int value) => _ = RescheduleAsync();
     partial void OnProteinRankingChanged(ProteinPriority value) => _ = RescheduleAsync();
     partial void OnPeptideRankingChanged(PeptidePriority value) => _ = RescheduleAsync();
     partial void OnTargetModeChanged(TargetListMode value) => _ = RescheduleAsync();

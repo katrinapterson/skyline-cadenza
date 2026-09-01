@@ -798,4 +798,133 @@ public class SchedulerTests
         Assert.Contains("exp2", scheduled);
         Assert.DoesNotContain("pred", scheduled);
     }
+
+    [Fact]
+    public void Scheduler_PeptideRankCap_LimitsGroupToTopRankedByQuantity()
+    {
+        // Four peptides in one protein, all at distinct RTs and m/z so budget
+        // and geometry never bind. With a rank cap of 2 only the two
+        // highest-quantity ones are ELIGIBLE, even though Max would allow 5.
+        var cands = new[]
+        {
+            Make("p1", 500.0, 1.0, 1.4, "G1", quantity: 9e6),
+            Make("p2", 510.0, 2.0, 2.4, "G1", quantity: 8e6),
+            Make("p3", 520.0, 3.0, 3.4, "G1", quantity: 7e6),
+            Make("p4", 530.0, 4.0, 4.4, "G1", quantity: 6e6),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 5,
+            PeptideRankCap = 2,
+            PeptideRanking = PeptidePriority.PrecursorQuantity,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "p1", "p2" }, scheduled);
+    }
+
+    [Fact]
+    public void Scheduler_PeptideRankCap_FollowsQValueRanking()
+    {
+        // Same pool, but ranked by q-value ascending - which is the exact
+        // REVERSE of the quantity order. The cap must keep the top two by
+        // q-value, proving it tracks whichever metric PeptideRanking selects.
+        var cands = new[]
+        {
+            Make("p1", 500.0, 1.0, 1.4, "G1", quantity: 9e6, qValue: 0.009),
+            Make("p2", 510.0, 2.0, 2.4, "G1", quantity: 8e6, qValue: 0.007),
+            Make("p3", 520.0, 3.0, 3.4, "G1", quantity: 7e6, qValue: 0.002),
+            Make("p4", 530.0, 4.0, 4.4, "G1", quantity: 6e6, qValue: 0.001),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 5,
+            PeptideRankCap = 2,
+            PeptideRanking = PeptidePriority.QValue,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "p3", "p4" }, scheduled);
+    }
+
+    [Fact]
+    public void Scheduler_PeptideRankCap_FollowsPredictedRanking()
+    {
+        // Predicted ranking (Carafe detectability / Bromo score), descending.
+        // Quantity order is again the reverse, so only the predicted score can
+        // produce this result.
+        var cands = new[]
+        {
+            Make("p1", 500.0, 1.0, 1.4, "G1", quantity: 9e6, predicted: 0.10),
+            Make("p2", 510.0, 2.0, 2.4, "G1", quantity: 8e6, predicted: 0.40),
+            Make("p3", 520.0, 3.0, 3.4, "G1", quantity: 7e6, predicted: 0.95),
+            Make("p4", 530.0, 4.0, 4.4, "G1", quantity: 6e6, predicted: 0.99),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 5,
+            PeptideRankCap = 2,
+            PeptideRanking = PeptidePriority.PredictedRanking,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "p3", "p4" }, scheduled);
+    }
+
+    [Fact]
+    public void Scheduler_PeptideRankCap_AppliesPerSourceTier()
+    {
+        // Backfill pool. A cap of 1 must mean "top 1 confirmed AND top 1
+        // predicted", not "top 1 of the merged pool" - the tiers rank by
+        // different metrics and the confirmed tier must not spend the
+        // predicted tier's cap (or vice versa).
+        var cands = new[]
+        {
+            Make("exp1", 500.0, 1.0, 1.4, "G1", quantity: 9e6),
+            Make("exp2", 510.0, 2.0, 2.4, "G1", quantity: 8e6),
+            Make("pred1", 520.0, 3.0, 3.4, "G1", quantity: 1e6, predicted: 0.99,
+                source: CandidateSource.Predicted),
+            Make("pred2", 530.0, 4.0, 4.4, "G1", quantity: 1e6, predicted: 0.80,
+                source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 5,
+            PeptideRankCap = 1,
+            PeptideRanking = PeptidePriority.PrecursorQuantity,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "exp1", "pred1" }, scheduled);
+    }
+
+    [Fact]
+    public void Scheduler_PeptideRankCapZero_SchedulesEveryEligiblePeptide()
+    {
+        // The default (0 = uncapped) must leave the pool untouched, which is
+        // what keeps existing schedules and the golden fixtures stable.
+        var cands = new[]
+        {
+            Make("p1", 500.0, 1.0, 1.4, "G1", quantity: 9e6),
+            Make("p2", 510.0, 2.0, 2.4, "G1", quantity: 8e6),
+            Make("p3", 520.0, 3.0, 3.4, "G1", quantity: 7e6),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 5,
+            PeptideRankCap = 0,
+        });
+
+        Assert.Equal(3, result.ScheduledIndices.Length);
+    }
 }
