@@ -91,6 +91,37 @@ public sealed record SchedulingParameters
     /// </summary>
     public int PeptideRankCap { get; init; } = 0;
 
+    /// <summary>
+    /// Minimum share of the co-isolated ion current that EVERY measured target
+    /// in a slot must hold while it elutes, as a fraction in [0, 1). A
+    /// placement is refused when it would leave any member below this share,
+    /// so a target is never scheduled into a window where competing ions would
+    /// take so much of the fill that it cannot be quantified.
+    ///
+    /// The denominator is every pooled precursor whose m/z falls in the slot's
+    /// emitted band (<c>MzMin - PrmIsolationWidthTh / 2</c> to
+    /// <c>MzMax + PrmIsolationWidthTh / 2</c>), whether or not it is itself
+    /// scheduled, each weighted by the fraction of ITS peak that co-elutes
+    /// with the member being judged. Both scopes matter: on a real HeLa MTM
+    /// acquisition roughly two thirds of the ion current inside the target
+    /// windows came from precursors that were never targets, so a
+    /// members-only check measures almost none of the competition; and
+    /// counting a neighbour's whole area on any overlap at all overstated the
+    /// competition by more than 3x for 57% of targets, scoring a huge
+    /// neighbour that clips the edge of a peak the same as one sitting on it.
+    ///
+    /// 0 (the default) disables the check, which keeps existing schedules and
+    /// the golden fixtures unchanged; the app defaults it to 0.02 (2%).
+    /// Precursors with no measured intensity (quantity &lt;= 0, i.e. Carafe
+    /// predictions) are invisible to it: they neither count as background nor
+    /// get protected as targets.
+    ///
+    /// The estimate counts only IDENTIFIED precursors, so it is a lower bound
+    /// on the true co-isolated current; unidentified background sits on top of
+    /// it and the threshold has to absorb that.
+    /// </summary>
+    public double MinTargetIonShare { get; init; } = 0.0;
+
     /// <summary>How to order the protein groups going into the assay.</summary>
     public ProteinPriority ProteinRanking { get; init; } = ProteinPriority.SummedIntensity;
 
@@ -120,45 +151,8 @@ public sealed record SchedulingParameters
     /// </summary>
     public CoverageObjective Objective { get; init; } = CoverageObjective.MaximizeProteins;
 
-    /// <summary>
-    /// How MTM isolation windows are allowed to grow relative to each other
-    /// and to precursors they would sweep over. See <see cref="WindowPacking"/>.
-    /// Defaults to <see cref="WindowPacking.Legacy"/> so existing schedules and
-    /// the golden fixtures are unchanged.
-    /// </summary>
-    public WindowPacking Packing { get; init; } = WindowPacking.Legacy;
-
     /// <summary>Convenience accessor: <see cref="FiringPadSec"/> in minutes.</summary>
     public double FiringPadMin => FiringPadSec / 60.0;
-}
-
-/// <summary>
-/// Controls whether a slot's isolation window may expand across precursors it
-/// would co-isolate, and whether two concurrent windows may overlap in m/z.
-/// </summary>
-public enum WindowPacking
-{
-    /// <summary>
-    /// Historical behaviour: each slot grows to cover its own members with no
-    /// awareness of its neighbours. A merge that widens the band can sweep it
-    /// over a precursor that was rejected for clashing (the "illusory
-    /// exclusion" in <c>docs/scheduler-window-scoping.md</c>), and two
-    /// concurrent windows may overlap, double-sampling the precursors between
-    /// them.
-    /// </summary>
-    Legacy,
-
-    /// <summary>
-    /// Slot-aware packing. Every slot carries growth bounds
-    /// (<see cref="Slot.GrowLo"/> / <see cref="Slot.GrowHi"/>) derived from the
-    /// nearest co-eluting, clashing precursor in the candidate pool on each
-    /// side, so a window can never expand across an interferer. Expansions and
-    /// new slots are additionally rejected when the resulting band would
-    /// overlap a concurrently-firing slot's band, so windows never grow into
-    /// one another. Protein-priority order and the per-protein fallback are
-    /// unchanged; the cost is paid in cycle budget, not coverage logic.
-    /// </summary>
-    Disjoint,
 }
 
 public enum AcquisitionMode

@@ -50,6 +50,9 @@ public static class PeptideTransitionListBuilder
 
         var inv = CultureInfo.InvariantCulture;
         var slotsById = schedule.Slots.ToDictionary(s => s.Id);
+        // Passengers ride in a driver's window and were never selected for
+        // quantifiability, so they must stay distinguishable in the document.
+        var passengers = new HashSet<int>(schedule.PassengerIndices);
 
         for (int i = 0; i < schedule.ScheduledIndices.Length; i++)
         {
@@ -72,7 +75,9 @@ public static class PeptideTransitionListBuilder
             var slot = slotsById[slotId];
 
             double windowMin = slot.RtStop - slot.RtStart;
-            string note = $"slot={slotId};type={c.PeptideType}";
+            string note = passengers.Contains(candIdx)
+                ? $"slot={slotId};type={c.PeptideType};passenger"
+                : $"slot={slotId};type={c.PeptideType}";
             string protein = c.ProteinGroup;
             string peptide = NormalizeModifiedSequence(c.ModifiedSequence);
 

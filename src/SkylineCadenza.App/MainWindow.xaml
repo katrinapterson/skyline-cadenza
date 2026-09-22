@@ -129,19 +129,15 @@
                 <TextBlock Text="{Binding PrmIsolationWidthTh, StringFormat='PRM / solo-slot window width: {0:0.0} Th'}" Margin="0,4,0,0"/>
                 <Slider Minimum="0.4" Maximum="2.0" TickFrequency="0.1" Value="{Binding PrmIsolationWidthTh}"/>
 
+                <TextBlock Text="{Binding MinTargetIonShare, StringFormat='Minimum target share of window current: {0:P1} (0 = off)'}" Margin="0,4,0,0"
+                           ToolTip="Refuses to place a target into a window where competing ions would take so much of the fill that it cannot be quantified. Every target in the slot is checked over its own elution, and each competitor counts only the part of its peak that actually co-elutes with that target - so a huge neighbour clipping the edge of a peak is not treated the same as one sitting on top of it. The denominator is every identified precursor in the emitted band, not just the scheduled targets: on a real HeLa MTM acquisition ~66% of the current inside the target windows came from precursors that were never targets. Raising this trades protein coverage for usable signal on the targets that remain. Counts identified precursors only, so it is a lower bound on the true competition."/>
+                <Slider Minimum="0" Maximum="0.30" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding MinTargetIonShare}"/>
+
                 <TextBlock Text="Charge handling per slot" Margin="0,8,0,2"/>
                 <RadioButton Content="Match charge per slot" GroupName="chargeHandling"
                              IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.SameChargePerSlot}}"/>
                 <RadioButton Content="Allow mixed (use slot majority charge)" GroupName="chargeHandling"
                              IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.AllowMixed}}"/>
-
-                <TextBlock Text="Window packing" Margin="0,8,0,2"/>
-                <RadioButton Content="Legacy (windows may overlap)" GroupName="windowPacking"
-                             IsChecked="{Binding Packing, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:WindowPacking.Legacy}}"/>
-                <RadioButton Content="Disjoint (no overlap; never sweep over an interferer)" GroupName="windowPacking"
-                             IsChecked="{Binding Packing, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:WindowPacking.Disjoint}}"/>
-                <TextBlock Text="Disjoint trades protein coverage for clean, narrower windows."
-                           TextWrapping="Wrap" FontSize="11" Opacity="0.7" Margin="0,2,0,0"/>
 
                 <!-- Cycle budget -->
                 <TextBlock Text="Cycle budget" FontWeight="Bold" Margin="0,16,0,4"/>
@@ -183,6 +179,9 @@
                 <TextBlock Text="{Binding NormalizedCollisionEnergy, StringFormat='Normalized CE: {0:0.0}'}"/>
                 <Slider Minimum="15" Maximum="40" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding NormalizedCollisionEnergy}"/>
                 <Button Content="Export Thermo CSV..." Command="{Binding ExportThermoCsvCommand}" Margin="0,4,0,4"/>
+                <CheckBox IsChecked="{Binding IncludePassengers}" Margin="0,6,0,4"
+                          Content="Include passengers in Skyline push"
+                          ToolTip="Passengers are precursors that already fall inside a scheduled window's isolation band and elute entirely within its firing time, so the instrument fragments them either way. Including them changes only what the Skyline document extracts, never the acquisition: the exported Thermo method is identical. They are tagged 'passenger' in the transition list so they stay distinguishable from intended targets. On a real HeLa assay this added ~9,200 precursors and ~450 protein groups for no extra cycle time."/>
                 <Button Content="Push targets to Skyline" Command="{Binding UpdateSkylineCommand}"
                         IsEnabled="{Binding SkylineConnected}"/>
 

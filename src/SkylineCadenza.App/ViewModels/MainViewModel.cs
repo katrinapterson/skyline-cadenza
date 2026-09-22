@@ -81,6 +81,27 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private double _isolationWindowTh = 3.0;
     [ObservableProperty] private double _fragmentTolDa = 0.5;
 
+    /// <summary>
+    /// Minimum share of the co-isolated ion current that EVERY target in a
+    /// slot must hold while it elutes. 0 disables the check. Defaults to 1.5%,
+    /// the break-even floor on the acquired 08/03 run once truncated-FASTA
+    /// artefact targets are excluded from the label: it removes 0.98 targets
+    /// DIA-NN never re-identified per one it does cost, against 0.82 at 2%.
+    /// (2% looked break-even before the artefacts were removed, because the
+    /// gate was getting credit for excluding targets that were never real
+    /// peptides.) Costs 1.7% of targets and 1.8% of driver protein groups.
+    /// </summary>
+    [ObservableProperty] private double _minTargetIonShare = 0.015;
+
+    /// <summary>
+    /// Include passengers when pushing to Skyline. Passengers already ride in
+    /// the scheduled windows, so this changes only what the document extracts,
+    /// never the acquisition: the exported Thermo method is identical either
+    /// way. Off by default so the pushed document holds exactly what was
+    /// targeted.
+    /// </summary>
+    [ObservableProperty] private bool _includePassengers;
+
     // PRM quad isolation width (also the minimum slot width for solo MTM slots).
     [ObservableProperty] private double _prmIsolationWidthTh = 0.7;
 
@@ -88,7 +109,6 @@ public partial class MainViewModel : ObservableObject
     // historical behaviour (and the golden fixtures); Disjoint stops a window
     // expanding across a clashing precursor and forbids concurrent windows from
     // overlapping in m/z. See docs/scheduler-window-scoping.md.
-    [ObservableProperty] private WindowPacking _packing = WindowPacking.Legacy;
 
     // Per-slot charge constraint + Thermo CSV NCE.
     [ObservableProperty] private ChargeHandling _chargeHandling = ChargeHandling.SameChargePerSlot;
@@ -445,10 +465,18 @@ public partial class MainViewModel : ObservableObject
             }
             blibPath = Path.Combine(Path.GetDirectoryName(docPath!)!, assayName + ".blib");
 
+                // The schedule the Skyline-side outputs are built from. The
+            // instrument method always uses the driver-only schedule:
+            // passengers ride in windows that already exist, so including them
+            // changes what the document extracts, never what the instrument does.
+            var assaySchedule = IncludePassengers
+                ? ScheduleResult.WithPassengers()
+                : ScheduleResult;
+
             // Step 1: BLIB write + library registration.
             StatusMessage = $"Writing assay BLIB to {Path.GetFileName(blibPath)}...";
             var writeResult = await Task.Run(() =>
-                BlibAssayWriter.Write(_candidates, ScheduleResult, blibPath!, assayName));
+                BlibAssayWriter.Write(_candidates, assaySchedule, blibPath!, assayName));
 
             // AddSettingsListItem cannot register a Spectral Libraries
             // entry. Skyline's JsonToolServer.DeserializeSettingsItem
@@ -526,7 +554,7 @@ public partial class MainViewModel : ObservableObject
             // The most common cause of an empty target tree is a
             // default product-ion-charges = {1} filter, which silently
             // rejects every +2 fragment DIA-NN picked.
-            var scheduledCands = ScheduleResult.ScheduledIndices
+            var scheduledCands = assaySchedule.ScheduledIndices
                 .Select(i => _candidates[i])
                 .ToList();
             StatusMessage = $"BLIB registered ({registrationDiag}): "
@@ -546,7 +574,7 @@ public partial class MainViewModel : ObservableObject
             // FragmentIon.Charge so Skyline's product-ion match succeeds
             // even for the +2 y/b fragments DIA-NN selects on longer
             // tryptic peptides.
-            var csv = PeptideTransitionListBuilder.Build(_candidates, ScheduleResult);
+            var csv = PeptideTransitionListBuilder.Build(_candidates, assaySchedule);
             int rowCount = csv.AsSpan().Count('\n') - 1;
             // Heavy isotope-labeled precursors (e.g. PRTC standards) are
             // omitted from the transition list by the builder - Skyline's
@@ -569,7 +597,7 @@ public partial class MainViewModel : ObservableObject
                 ? $"~{rowCount / rowsPerSec:0} s"
                 : $"~{etaMin:0.0} min";
             StatusMessage = $"BLIB registered. Importing transition list: "
-                + $"{ScheduleResult.ScheduledIndices.Length:n0} precursors "
+                + $"{assaySchedule.ScheduledIndices.Length:n0} precursors "
                 + $"({rowCount:n0} rows){heavyNote}. ETA {etaText}. "
                 + "Live progress in Skyline's Immediate Window.";
 
@@ -1297,7 +1325,6 @@ public partial class MainViewModel : ObservableObject
             FiringPadSec = FiringPadSec,
             QValueCutoff = QValueCutoff,
             PrmIsolationWidthTh = PrmIsolationWidthTh,
-            Packing = Packing,
             ChargeHandling = ChargeHandling,
             NormalizedCollisionEnergy = NormalizedCollisionEnergy,
             TargetProteins = targets,
@@ -1305,6 +1332,7 @@ public partial class MainViewModel : ObservableObject
             MinPeptidesPerProtein = MinPeptidesPerProtein,
             MaxPeptidesPerProtein = MaxPeptidesPerProtein,
             PeptideRankCap = PeptideRankCap,
+            MinTargetIonShare = MinTargetIonShare,
             ProteinRanking = ProteinRanking,
             PeptideRanking = PeptideRanking,
         };
@@ -1333,8 +1361,8 @@ public partial class MainViewModel : ObservableObject
     partial void OnDetectabilityCutoffChanged(double value) => _ = RefreshCarafeAsync();
 
     partial void OnPrmIsolationWidthThChanged(double value) => _ = RescheduleAsync();
+    partial void OnMinTargetIonShareChanged(double value) => _ = RescheduleAsync();
     partial void OnChargeHandlingChanged(ChargeHandling value) => _ = RescheduleAsync();
-    partial void OnPackingChanged(WindowPacking value) => _ = RescheduleAsync();
     // NormalizedCollisionEnergy is output-only - no reschedule.
     partial void OnMinPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();
     partial void OnMaxPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();

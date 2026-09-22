@@ -80,14 +80,20 @@ public class SchedulerTests
     [Fact]
     public void Strict_co_elution_blocks_chain_extension()
     {
-        // A and B overlap; B and C overlap; A and C do not. Under the
-        // bounding-box bug C would chain in. Under the intersection check
+        // A and B overlap; B and C overlap; A and C do not. C's RT still
+        // overlaps the merged slot's padded firing window, so under the
+        // bounding-box bug it would chain in. Under the intersection check
         // (this implementation) C must start a fresh slot.
+        //
+        // C sits 1.25 Th above A so its own band ([500.90, 501.60]) clears the
+        // A+B band ([499.65, 500.85]): it stays m/z-eligible to JOIN that slot
+        // (1.25 Th span, inside the 2.3 Th budget) while still being placeable
+        // as a disjoint window of its own once the co-elution check rejects it.
         var cands = new[]
         {
-            Make("A", 500.0, 5.0, 5.6, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
-            Make("B", 500.5, 5.5, 6.1, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
-            Make("C", 500.7, 6.0, 6.6, "G3", fragments: new[] { 175.0, 275.0, 375.0, 475.0 }),
+            Make("A", 500.00, 5.0, 5.6, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("B", 500.50, 5.5, 6.1, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+            Make("C", 501.25, 6.0, 6.6, "G3", fragments: new[] { 175.0, 275.0, 375.0, 475.0 }),
         };
 
         var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100 });
@@ -108,17 +114,40 @@ public class SchedulerTests
     [Fact]
     public void Fragment_clash_prevents_slot_sharing()
     {
-        // Same RT window, similar m/z, but fragments overlap. Must not share.
+        // Same RT window, m/z close enough to merge (1.25 Th span, inside the
+        // 2.3 Th budget), but fragments overlap. Must not share a slot. They
+        // are 1.25 Th apart so each still gets a disjoint band of its own.
         var cands = new[]
         {
-            Make("A", 500.0, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
-            Make("B", 500.5, 5.1, 5.5, "G2", fragments: new[] { 100.2, 250.0, 350.0, 450.0 }),
+            Make("A", 500.00, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("B", 501.25, 5.1, 5.5, "G2", fragments: new[] { 100.2, 250.0, 350.0, 450.0 }),
         };
 
         var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100, FragmentTolDa = 0.5 });
 
         Assert.Equal(2, result.ScheduledIndices.Length);
         Assert.Equal(2, result.Slots.Length);
+    }
+
+    [Fact]
+    public void Scheduler_ClashingPrecursorsInsideQuadFloor_DropsTheLowerPriorityOne()
+    {
+        // 0.5 Th apart, inside the 0.7 Th quadrupole floor, and they clash on
+        // fragments. No pair of bands can separate them and they cannot share a
+        // slot, so the lower-priority one drops out rather than opening a second
+        // window that would simply re-sample the first.
+        var cands = new[]
+        {
+            Make("keep", 500.0, 5.0, 5.4, "G1", quantity: 9e6,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("drop", 500.5, 5.1, 5.5, "G2", quantity: 1e6,
+                 fragments: new[] { 100.2, 250.0, 350.0, 450.0 }),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100 });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "keep" }, scheduled);
     }
 
     [Fact]
@@ -790,7 +819,6 @@ public class SchedulerTests
         {
             CycleBudget = 5,
             FragmentTolDa = 0.5,
-            Packing = WindowPacking.Disjoint,
         });
 
         var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
@@ -926,5 +954,212 @@ public class SchedulerTests
         });
 
         Assert.Equal(3, result.ScheduledIndices.Length);
+    }
+
+    // Background pool for the co-isolation tests. "bg" is a real identified
+    // precursor that is NOT on the target list, so it is never scheduled but
+    // still competes for the fill - which is the situation the guard exists
+    // for, and the dominant one in practice (~80% of measured co-isolation
+    // came from precursors that were never scheduled).
+    private static SchedulingParameters CoIsolationParams(double share, params string[] targets) => new()
+    {
+        CycleBudget = 100,
+        MinTargetIonShare = share,
+        TargetProteins = new HashSet<string>(targets),
+        TargetMode = TargetListMode.Exclusive,
+    };
+
+    // "a" and "b" are 1.25 Th apart: m/z-eligible to merge (inside the 2.3 Th
+    // budget) and each still placeable as a disjoint window on its own. The
+    // interferer sits at 500.6, BETWEEN their two solo bands - inside the
+    // merged band ([499.65, 501.60]) but outside both solo bands - so it
+    // penalises only the join.
+    private static Candidate[] CoIsolationPool(bool withInterferer)
+    {
+        var pool = new List<Candidate>
+        {
+            Make("a", 500.00, 5.0, 5.4, "G1", quantity: 1e6,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("b", 501.25, 5.1, 5.5, "G2", quantity: 1e5,
+                 fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+        };
+        if (withInterferer)
+            pool.Add(Make("bg", 500.60, 5.0, 5.5, "BG", quantity: 5e7,
+                          fragments: new[] { 100.0, 150.0, 200.0, 250.0 }));
+        return pool.ToArray();
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_BlocksJoinIntoCrowdedBand()
+    {
+        // Without the interferer "b" holds 9.1% of the merged window and the
+        // pair multiplexes. With it, "b" holds 0.2% and the join is refused.
+        var cands = CoIsolationPool(withInterferer: true);
+
+        var result = Scheduler.Run(cands, CoIsolationParams(0.05, "G1", "G2"));
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "a", "b" }, scheduled);
+        Assert.DoesNotContain(result.Slots, s => s.MemberIndices.Count > 1);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_CountsUnscheduledPrecursorsAsBackground()
+    {
+        // The same two targets, with and without a co-isolated neighbour that
+        // is never scheduled. A members-only check would see the two pools as
+        // identical; the band-wide check must not.
+        var p = CoIsolationParams(0.05, "G1", "G2");
+
+        var clean = Scheduler.Run(CoIsolationPool(withInterferer: false), p);
+        Assert.Single(clean.Slots);
+        Assert.Equal(2, clean.Slots[0].MemberIndices.Count);
+
+        var cands = CoIsolationPool(withInterferer: true);
+        var crowded = Scheduler.Run(cands, p);
+        Assert.DoesNotContain(crowded.Slots, s => s.MemberIndices.Count > 1);
+        // The interferer really is pure background: never scheduled itself.
+        Assert.DoesNotContain("bg",
+            crowded.ScheduledIndices.Select(i => cands[i].PrecursorId));
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_RejectsStarvedSoloWindow()
+    {
+        // A single target drowned by co-isolated background. Solo windows are
+        // where the guard matters most, so it must fire on the new-slot branch
+        // too, not only on joins.
+        var cands = new[]
+        {
+            Make("target", 500.0, 5.0, 5.4, "G1", quantity: 1e4,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("bg", 500.2, 5.0, 5.4, "BG", quantity: 1e8,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        };
+
+        var result = Scheduler.Run(cands, CoIsolationParams(0.05, "G1"));
+
+        Assert.Empty(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_FallsThroughToCleanerPeptide()
+    {
+        // One protein, two peptides. Its best-ranked peptide sits under a
+        // dominating co-isolated neighbour; the next one is in clean space.
+        // The cover pass must fall through and still cover the protein,
+        // exactly as it does on an RT-budget rejection.
+        var cands = new[]
+        {
+            Make("best", 500.0, 5.0, 5.4, "G1", quantity: 9e5,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("clean", 700.0, 5.0, 5.4, "G1", quantity: 5e5,
+                 fragments: new[] { 110.0, 210.0, 310.0, 410.0 }),
+            Make("bg", 500.2, 5.0, 5.4, "BG", quantity: 1e8,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        };
+
+        var result = Scheduler.Run(cands, CoIsolationParams(0.05, "G1") with
+        {
+            MinPeptidesPerProtein = 1,
+            MaxPeptidesPerProtein = 1,
+        });
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "clean" }, scheduled);
+        Assert.Equal(1, result.ProteinGroupsCovered);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_IgnoresCandidatesWithNoMeasuredIntensity()
+    {
+        // Carafe-predicted targets carry no quantity. They must neither be
+        // rejected as starved nor counted as background. 1.25 Th apart so the
+        // bands are disjoint and the only thing under test is the guard.
+        var cands = new[]
+        {
+            Make("pred", 500.00, 5.0, 5.4, "G1", quantity: 0.0, predicted: 0.9,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 },
+                 source: CandidateSource.Predicted),
+            Make("predBg", 501.25, 5.0, 5.4, "G2", quantity: 0.0, predicted: 0.8,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 },
+                 source: CandidateSource.Predicted),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MinTargetIonShare = 0.05,
+        });
+
+        Assert.Equal(2, result.ScheduledIndices.Length);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_WeightsInterferersByHowMuchOfTheirPeakOverlaps()
+    {
+        // "huge" is 50x the target but its peak only clips the last 0.02 min of
+        // the target's. Counting its WHOLE area would put the target at 1.96%
+        // and reject it; counting only the 2% of the huge peak that actually
+        // co-elutes puts the target at 50% and it stands.
+        var cands = new[]
+        {
+            Make("target", 500.0, 5.00, 5.40, "G1", quantity: 1e6,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("huge", 500.2, 5.38, 6.38, "BG", quantity: 5e7,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        };
+
+        var scheduled = Scheduler.Run(cands, CoIsolationParams(0.05, "G1"))
+            .ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+
+        Assert.Equal(new HashSet<string> { "target" }, scheduled);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShare_ChecksEveryMemberNotJustTheSmallest()
+    {
+        // "broad" carries the larger area but elutes across the whole window;
+        // "narrow" is smaller but elutes only at the very end. The interferer
+        // sits between their two solo bands - so it enters the picture only if
+        // they merge - and overlaps ONLY "broad".
+        //
+        // Judging the slot by its smallest-area member would look at "narrow",
+        // which the interferer never touches, and allow the merge. Checking
+        // every member catches that "broad" would be starved.
+        var cands = new[]
+        {
+            Make("broad", 500.00, 5.0, 6.0, "G1", quantity: 1e6,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("narrow", 501.25, 5.9, 6.0, "G2", quantity: 5e5,
+                 fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+            Make("bg", 500.60, 5.0, 5.2, "BG", quantity: 1e8,
+                 fragments: new[] { 110.0, 210.0, 310.0, 410.0 }),
+        };
+
+        var result = Scheduler.Run(cands, CoIsolationParams(0.05, "G1", "G2"));
+
+        var scheduled = result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "broad", "narrow" }, scheduled);
+        Assert.DoesNotContain(result.Slots, s => s.MemberIndices.Count > 1);
+    }
+
+    [Fact]
+    public void Scheduler_MinTargetIonShareZero_LeavesSchedulingUnchanged()
+    {
+        // The default (0 = off) keeps the starved target: same pool as
+        // Scheduler_MinTargetIonShare_RejectsStarvedSoloWindow, guard off.
+        var cands = new[]
+        {
+            Make("target", 500.0, 5.0, 5.4, "G1", quantity: 1e4,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("bg", 500.2, 5.0, 5.4, "BG", quantity: 1e8,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        };
+
+        var result = Scheduler.Run(cands, CoIsolationParams(0.0, "G1"));
+
+        Assert.Single(result.ScheduledIndices);
+        Assert.Equal("target", cands[result.ScheduledIndices[0]].PrecursorId);
     }
 }

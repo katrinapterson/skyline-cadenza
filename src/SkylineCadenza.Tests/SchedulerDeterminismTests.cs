@@ -59,12 +59,11 @@ public class SchedulerDeterminismTests
         return s;
     }
 
-    private static HashSet<string> Schedule(List<Candidate> pool, CoverageObjective objective,
-                                            WindowPacking packing = WindowPacking.Legacy)
+    private static HashSet<string> Schedule(List<Candidate> pool, CoverageObjective objective)
     {
         var r = Scheduler.Run(pool, new SchedulingParameters
         {
-            CycleBudget = 8, Objective = objective, Packing = packing,
+            CycleBudget = 8, Objective = objective,
         });
         return r.ScheduledIndices.Select(i => pool[i].PrecursorId).ToHashSet();
     }
@@ -75,8 +74,14 @@ public class SchedulerDeterminismTests
     [InlineData(CoverageObjective.MaximizePeptides)]
     public void Scheduler_TiedScores_ScheduleIsIndependentOfCandidateOrder(CoverageObjective objective)
     {
+        // Slot-aware packing adds two order-sensitive-LOOKING mechanisms -
+        // growth bounds and the neighbour-band probe - so this also covers
+        // them. Bounds are sourced from the static candidate POOL (not from
+        // the slots built so far) and only ever tighten, which is what keeps
+        // them independent of the order proteins happen to be processed in.
         var pool = TiedScorePool();
         var expected = Schedule(pool, objective);
+        Assert.NotEmpty(expected);
 
         foreach (int seed in new[] { 1, 42, 7919 })
         {
@@ -88,30 +93,4 @@ public class SchedulerDeterminismTests
         }
     }
 
-    /// <summary>
-    /// Same guarantee under <see cref="WindowPacking.Disjoint"/>. Slot-aware
-    /// packing adds two order-sensitive-looking mechanisms - growth bounds and
-    /// the neighbour-band probe - so it gets its own coverage. Bounds are
-    /// sourced from the static candidate POOL (not from the slots built so
-    /// far), and only ever tighten, which is what keeps them independent of
-    /// the order proteins happen to be processed in.
-    /// </summary>
-    [Theory]
-    [InlineData(CoverageObjective.Balanced)]
-    [InlineData(CoverageObjective.MaximizeProteins)]
-    [InlineData(CoverageObjective.MaximizePeptides)]
-    public void Scheduler_DisjointPacking_ScheduleIsIndependentOfCandidateOrder(CoverageObjective objective)
-    {
-        var pool = TiedScorePool();
-        var expected = Schedule(pool, objective, WindowPacking.Disjoint);
-        Assert.NotEmpty(expected);
-
-        foreach (int seed in new[] { 1, 42, 7919 })
-        {
-            var actual = Schedule(Shuffled(pool, seed), objective, WindowPacking.Disjoint);
-            Assert.True(expected.SetEquals(actual),
-                $"{objective} + Disjoint: shuffling the candidate list (seed {seed}) changed the " +
-                $"schedule ({expected.Intersect(actual).Count()} of {expected.Count} shared).");
-        }
-    }
 }

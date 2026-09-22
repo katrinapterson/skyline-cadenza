@@ -5,13 +5,12 @@ namespace SkylineCadenza.Tests;
 
 /// <summary>
 /// Covers the window-scoping invariants described in
-/// <c>docs/scheduler-window-scoping.md</c>. Under
-/// <see cref="WindowPacking.Legacy"/> a slot's fragment-clash check is scoped
-/// to its members while the isolation window physically co-isolates everything
-/// in its m/z band, so expanding a window can sweep it across a precursor that
-/// was explicitly rejected for clashing (the "illusory exclusion").
-/// <see cref="WindowPacking.Disjoint"/> fixes that with per-slot growth bounds
-/// and a neighbour-band probe.
+/// <c>docs/scheduler-window-scoping.md</c>. A slot's fragment-clash check is
+/// scoped to its members while the isolation window physically co-isolates
+/// everything in its m/z band, so without per-slot growth bounds expanding a
+/// window could sweep it across a precursor that was explicitly rejected for
+/// clashing (the "illusory exclusion"). Slot-aware packing - now the only
+/// behaviour - prevents that with growth bounds and a neighbour-band probe.
 /// </summary>
 public class SchedulerWindowScopingTests
 {
@@ -48,10 +47,11 @@ public class SchedulerWindowScopingTests
     }
 
     // A and P share no fragment (may multiplex); Q sits between them in m/z and
-    // clashes with EACH. A-P center span is 1.5 Th, inside the 2.3 Th budget, so
-    // Legacy merges A and P into a band [599.65, 601.85] that swallows Q (600.75)
-    // - the precursor it just rejected for clashing with A. A and Q solo
-    // (0.75 Th apart, 0.7 Th wide) do NOT co-isolate; only the expansion does.
+    // clashes with EACH. The A-P center span is 1.5 Th, inside the 2.3 Th
+    // budget, so an unbounded merge would produce a band [599.65, 601.85] that
+    // swallows Q (600.75) - the precursor it just rejected for clashing with A.
+    // A and Q solo (0.75 Th apart, 0.7 Th wide) do NOT co-isolate; only the
+    // expansion does, which is exactly what the growth bounds prevent.
     private static Candidate[] AqpCandidates() => new[]
     {
         Make("A", 600.00, 5.0, 5.4, "G1", 2e6, new[] { 1000.0, 1100.0, 1200.0, 1300.0 }),
@@ -59,14 +59,13 @@ public class SchedulerWindowScopingTests
         Make("P", 601.50, 5.0, 5.4, "G1", 1e6, new[] { 1400.0, 1700.0, 1800.0, 1900.0 }),
     };
 
-    private static SchedulingParameters Params(WindowPacking packing) => new()
+    private static SchedulingParameters Params() => new()
     {
         CycleBudget = 100,
         IsolationWindowTh = 3.0,
         PrmIsolationWidthTh = Prm,
         FragmentTolDa = Tol,
         Objective = CoverageObjective.MaximizeProteins,
-        Packing = packing,
     };
 
     /// <summary>
@@ -95,10 +94,10 @@ public class SchedulerWindowScopingTests
     }
 
     [Fact]
-    public void Scheduler_DisjointPacking_WindowNeverExpandsOverClashingNonMember()
+    public void Scheduler_SlotAwarePacking_WindowNeverExpandsOverClashingNonMember()
     {
         var cands = AqpCandidates();
-        var result = Scheduler.Run(cands, Params(WindowPacking.Disjoint));
+        var result = Scheduler.Run(cands, Params());
 
         Assert.Equal(0, CountUncheckedCoIsolations(cands, result));
 
@@ -110,37 +109,18 @@ public class SchedulerWindowScopingTests
     }
 
     [Fact]
-    public void Scheduler_LegacyPacking_StillSweepsBandOverClashingNonMember()
+    public void Scheduler_PrmMode_SlotsStaySoloAndZeroSpan()
     {
-        // Documents the default behaviour the flag exists to change. If this
-        // ever reports zero, Legacy has silently changed and the golden
-        // fixtures should be re-examined.
+        // A PRM slot is one precursor at a fixed quadrupole width, so the
+        // slot-aware packing guards must not engage: no growth bounds, no
+        // neighbour-band rejections, every slot solo and zero-span.
         var cands = AqpCandidates();
-        var result = Scheduler.Run(cands, Params(WindowPacking.Legacy));
+        var prm = Params() with { Mode = AcquisitionMode.Prm };
 
-        Assert.True(CountUncheckedCoIsolations(cands, result) > 0);
-    }
+        var result = Scheduler.Run(cands, prm);
 
-    [Fact]
-    public void Scheduler_PrmMode_PackingHasNoEffect()
-    {
-        // Disjoint is deliberately inert in PRM: a PRM slot holds exactly one
-        // precursor and its band is a fixed PrmIsolationWidthTh, so it never
-        // grows (the sweep-over-interferer failure is impossible) and the
-        // non-overlap rule could only ever DROP targets that sit within a quad
-        // width of each other - which no window scheme can separate anyway.
-        var cands = AqpCandidates();
-        var prm = Params(WindowPacking.Legacy) with { Mode = AcquisitionMode.Prm };
-        var dis = Params(WindowPacking.Disjoint) with { Mode = AcquisitionMode.Prm };
-
-        var a = Scheduler.Run(cands, prm);
-        var b = Scheduler.Run(cands, dis);
-
-        Assert.Equal(a.ScheduledIndices, b.ScheduledIndices);
-        Assert.Equal(a.ProteinGroupsCovered, b.ProteinGroupsCovered);
-        Assert.Equal(a.Slots.Length, b.Slots.Length);
-        // Every PRM slot is solo and zero-span, under either packing.
-        Assert.All(b.Slots, s =>
+        Assert.Equal(3, result.ScheduledIndices.Length);
+        Assert.All(result.Slots, s =>
         {
             Assert.Single(s.MemberIndices);
             Assert.Equal(s.MzMin, s.MzMax, 9);
@@ -148,7 +128,7 @@ public class SchedulerWindowScopingTests
     }
 
     [Fact]
-    public void Scheduler_DisjointPacking_SurvivingCoIsolationsAreAllUnseparable()
+    public void Scheduler_SlotAwarePacking_SurvivingCoIsolationsAreAllUnseparable()
     {
         // Disjoint cannot eliminate every co-isolation: two co-eluting
         // precursors closer than PrmIsolationWidthTh cannot be given disjoint
@@ -159,9 +139,10 @@ public class SchedulerWindowScopingTests
         // s0/s1 clash 0.2 Th apart -> unseparable, may survive.
         //
         // s2/x clash 1.0 Th apart -> separable. A lone clashing pair is never
-        // co-isolated even under Legacy (they just take separate solo slots), so
+        // co-isolated by solo bands (they just take separate slots), so
         // the discriminating case needs a THIRD precursor that widens a band
-        // across the interferer: s4 doesn't clash s2, so Legacy merges s2+s4
+        // across the interferer: s4 doesn't clash s2, so an unbounded merge
+        // would join s2+s4
         // (span 2.0 Th, inside the 2.3 budget) into a band [601.65, 604.35] that
         // swallows x at 603.0. Disjoint must bound s2's growth short of x.
         var cands = new[]
@@ -173,7 +154,7 @@ public class SchedulerWindowScopingTests
             Make("s4", 604.0, 5.0, 5.4, "G4", 2e6, new[] { 5000.0, 5100.0, 5200.0, 5300.0 }),
         };
 
-        var result = Scheduler.Run(cands, Params(WindowPacking.Disjoint));
+        var result = Scheduler.Run(cands, Params());
 
         foreach (var slot in result.Slots)
         {
@@ -215,7 +196,7 @@ public class SchedulerWindowScopingTests
     /// and nothing is lost.
     /// </summary>
     [Fact]
-    public void Scheduler_DisjointPacking_ShrinksBlockingSlotAndReabsorbsEvictedMember()
+    public void Scheduler_SlotAwarePacking_ShrinksBlockingSlotAndReabsorbsEvictedMember()
     {
         var cands = new[]
         {
@@ -224,7 +205,7 @@ public class SchedulerWindowScopingTests
             Make("P", 602.6, 5.0, 5.4, "G3", 1e6, new[] { 3000.0, 3100.0, 3200.0, 3300.0 }),
         };
 
-        var result = Scheduler.Run(cands, Params(WindowPacking.Disjoint));
+        var result = Scheduler.Run(cands, Params());
 
         // All three proteins covered - P got in without costing B its place.
         Assert.Equal(3, result.ProteinGroupsCovered);
@@ -251,7 +232,7 @@ public class SchedulerWindowScopingTests
     /// leave the incumbent alone rather than trading one precursor for another.
     /// </summary>
     [Fact]
-    public void Scheduler_DisjointPacking_RefusesToShrinkWhenBlockerCannotSurvive()
+    public void Scheduler_SlotAwarePacking_RefusesToShrinkWhenBlockerCannotSurvive()
     {
         var cands = new[]
         {
@@ -261,7 +242,7 @@ public class SchedulerWindowScopingTests
             Make("P", 600.4, 5.0, 5.4, "G2", 1e6, new[] { 1000.0, 3100.0, 3200.0, 3300.0 }),
         };
 
-        var result = Scheduler.Run(cands, Params(WindowPacking.Disjoint));
+        var result = Scheduler.Run(cands, Params());
 
         int a = Array.FindIndex(cands, c => c.PrecursorId == "A");
         int pi = Array.FindIndex(cands, c => c.PrecursorId == "P");
@@ -289,7 +270,7 @@ public class SchedulerWindowScopingTests
     }
 
     [Fact]
-    public void Scheduler_DisjointPacking_ConcurrentBandsNeverOverlap()
+    public void Scheduler_SlotAwarePacking_ConcurrentBandsNeverOverlap()
     {
         // Eight co-eluting precursors 0.5 Th apart, with two clash pairs seeded
         // (p2 clashes p0 on 1000, p4 clashes p1 on 1400) to force window splits.
@@ -305,7 +286,7 @@ public class SchedulerWindowScopingTests
             Make("p7", 603.5, 5.0, 5.4, "G7", 1e6, new[] { 3600.0, 3700.0, 3800.0, 3900.0 }),
         };
 
-        var result = Scheduler.Run(cands, Params(WindowPacking.Disjoint));
+        var result = Scheduler.Run(cands, Params());
 
         for (int i = 0; i < result.Slots.Length; i++)
         {

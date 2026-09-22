@@ -32,6 +32,20 @@ namespace SkylineCadenza.Core.Scheduling;
 /// </remarks>
 public static class Scheduler
 {
+    /// <summary>
+    /// Minimum share of its window's co-isolated ion current a precursor must
+    /// hold to be admitted as a passenger. Not user-tunable: it is calibrated
+    /// against the acquired 08/03 HeLa MTM run, where a full-FASTA search of
+    /// the same raw data gives ground truth for which ridealongs DIA-NN
+    /// actually found. Combined with full RT containment, 5% emits 9,588
+    /// precursors at 74.0% precision for +476 protein groups; dropping the
+    /// share floor takes precision to 64.3%, and raising it to 10% costs 109 of
+    /// those proteins for 5 points of precision. (Calibrated against the
+    /// OVERLAP-WEIGHTED denominator; on the older unweighted one the equivalent
+    /// operating point was 1%.)
+    /// </summary>
+    private const double PassengerMinShare = 0.05;
+
     public static ScheduleResult Run(
         IReadOnlyList<Candidate> candidates,
         SchedulingParameters parameters,
@@ -127,7 +141,10 @@ public static class Scheduler
             }
         }
 
-        // Slot-aware packing (WindowPacking.Disjoint). Two guards, with
+        // Slot-aware packing. Isolation windows never expand across a
+        // precursor they would co-isolate, and two concurrently-firing bands
+        // never overlap. MTM only: a PRM slot is a single precursor at a fixed
+        // quadrupole width, so it has nothing to pack. Two guards, with
         // different lifetimes:
         //
         //   1. Growth bounds from CLASH BARRIERS. Sourced from the candidate
@@ -137,8 +154,7 @@ public static class Scheduler
         //      is independent of the order proteins happen to be processed in.
         //   2. NEIGHBOUR BANDS. Slots appear as scheduling proceeds, so these
         //      are probed at expansion time rather than cached.
-        bool disjointPacking = parameters.Packing == WindowPacking.Disjoint
-                               && parameters.Mode == AcquisitionMode.Mtm;
+        bool disjointPacking = parameters.Mode == AcquisitionMode.Mtm;
 
         // Clash-barrier pool for TightenBounds. Populated per-tier inside the
         // scheduling loop below: the experimental tier sees only experimental
@@ -213,6 +229,144 @@ public static class Scheduler
             return false;
         }
 
+        // Co-isolation guard. What actually starves a low-abundance target in a
+        // chimeric MTM scan is its share of the ion current admitted by the
+        // isolation band, and most of that current belongs to precursors the
+        // scheduler never targeted: measured on a real HeLa MTM acquisition,
+        // ~66% of the detected current inside the target windows came from
+        // non-targets, and 74% of windows held more non-target than target
+        // current. So the denominator here is the whole pooled population in
+        // the band, not the slot's own members.
+        //
+        // Pool arrays are sorted by m/z and rebuilt per source tier alongside
+        // candByMzBin: the experimental tier sees experimental precursors only,
+        // so its schedule stays invariant to whether a Carafe library is
+        // loaded, and the predicted tier sees everything.
+        bool interferenceGuard = parameters.MinTargetIonShare > 0.0;
+        var noMembers = new List<int>();
+        double[] bgMz = Array.Empty<double>();
+        double[] bgRt0 = Array.Empty<double>();
+        double[] bgRt1 = Array.Empty<double>();
+        double[] bgQty = Array.Empty<double>();
+        int[] bgIdx = Array.Empty<int>();
+
+        // Passenger-pass pool: every candidate with a measured intensity,
+        // regardless of tier. Distinct from the tier-scoped gate pool because
+        // this runs after all scheduling, so there is no tier to keep invariant.
+        double[] bgAllMz = Array.Empty<double>(), bgAllRt0 = Array.Empty<double>(),
+                 bgAllRt1 = Array.Empty<double>(), bgAllQty = Array.Empty<double>();
+        int[] bgAllIdx = Array.Empty<int>();
+
+        void RebuildBackgroundPoolAll()
+        {
+            var keep = new List<int>(candidates.Count);
+            for (int i = 0; i < candidates.Count; i++)
+                if (candidates[i].PrecursorQuantity > 0.0) keep.Add(i);
+            keep.Sort((x, y) => candidates[x].PrecursorMz.CompareTo(candidates[y].PrecursorMz));
+            int n = keep.Count;
+            bgAllMz = new double[n]; bgAllRt0 = new double[n]; bgAllRt1 = new double[n];
+            bgAllQty = new double[n]; bgAllIdx = new int[n];
+            for (int k = 0; k < n; k++)
+            {
+                var c = candidates[keep[k]];
+                bgAllMz[k] = c.PrecursorMz; bgAllRt0[k] = c.RtStart; bgAllRt1[k] = c.RtStop;
+                bgAllQty[k] = c.PrecursorQuantity; bgAllIdx[k] = keep[k];
+            }
+        }
+
+        void RebuildBackgroundPool(CandidateSource tier)
+        {
+            if (!interferenceGuard) return;
+            var keep = new List<int>(candidates.Count);
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                // Only measured intensities can contribute to the estimate.
+                if (!(candidates[i].PrecursorQuantity > 0.0)) continue;
+                if (tier == CandidateSource.Experimental
+                    && candidates[i].Source != CandidateSource.Experimental) continue;
+                keep.Add(i);
+            }
+            keep.Sort((x, y) => candidates[x].PrecursorMz.CompareTo(candidates[y].PrecursorMz));
+            int n = keep.Count;
+            bgMz = new double[n]; bgRt0 = new double[n]; bgRt1 = new double[n];
+            bgQty = new double[n]; bgIdx = new int[n];
+            for (int k = 0; k < n; k++)
+            {
+                var c = candidates[keep[k]];
+                bgMz[k] = c.PrecursorMz; bgRt0[k] = c.RtStart; bgRt1[k] = c.RtStop;
+                bgQty[k] = c.PrecursorQuantity; bgIdx[k] = keep[k];
+            }
+        }
+
+        static int LowerBound(double[] a, double v)
+        {
+            int lo = 0, hi = a.Length;
+            while (lo < hi)
+            {
+                int mid = (int)(((uint)lo + (uint)hi) >> 1);
+                if (a[mid] < v) lo = mid + 1; else hi = mid;
+            }
+            return lo;
+        }
+
+        // Ion current admitted by [bandLo, bandHi] over precursor `self`'s own
+        // elution, as a fraction of which `self` is the numerator.
+        //
+        // Every other in-band precursor contributes only the portion of its area
+        // that actually co-elutes with `self`, weighted by overlap. Counting a
+        // neighbour's WHOLE area on any overlap at all badly overstates the
+        // competition: on the 08/03 targets, 57% had their competition
+        // overstated by more than 3x that way, and a huge neighbour clipping the
+        // edge of a peak scored identically to one sitting on top of it. The
+        // top-hat weighting is deliberately model-free - it needs only
+        // RtStart / RtStop / PrecursorQuantity, no peak-shape assumption.
+        // Modelling actual elution profiles and testing the instantaneous share
+        // at each measurement point was measured against this and is WORSE
+        // (AUC 0.753 at the apex against 0.767 overlap-weighted), because a
+        // target is quantified from its integrated peak, not from one point.
+        double CoIsolatedTotalFor(double bandLo, double bandHi, int self)
+        {
+            var c = candidates[self];
+            double s0 = c.RtStart, s1 = c.RtStop;
+            double total = 0.0;
+            for (int k = LowerBound(bgMz, bandLo); k < bgMz.Length && bgMz[k] <= bandHi; k++)
+            {
+                double ov = Math.Min(bgRt1[k], s1) - Math.Max(bgRt0[k], s0);
+                if (ov <= 0.0) continue;
+                // bgIdx[k] == self contributes at weight 1 (full self-overlap),
+                // which is exactly the numerator's own term.
+                double dur = bgRt1[k] - bgRt0[k];
+                total += dur > 0.0 ? bgQty[k] * Math.Min(1.0, ov / dur) : bgQty[k];
+            }
+            return total;
+        }
+
+        // True when ANY measured member of the prospective slot would hold less
+        // than MinTargetIonShare of the current admitted while it elutes.
+        //
+        // Checked per member rather than for the smallest one: once each member
+        // has its own overlap-weighted denominator, the member with the smallest
+        // area is no longer necessarily the worst off. A broad member can be
+        // starved by an interferer that never touches a narrow one beside it.
+        bool StarvesAnyTarget(double mzMin, double mzMax, List<int> members, int joining)
+        {
+            if (!interferenceGuard) return false;
+            double lo = mzMin - prmHalf, hi = mzMax + prmHalf;
+
+            bool Starved(int ci)
+            {
+                double q = candidates[ci].PrecursorQuantity;
+                // No measured intensity: nothing this check can speak to.
+                if (!(q > 0.0)) return false;
+                double total = CoIsolatedTotalFor(lo, hi, ci);
+                return total > 0.0 && q < parameters.MinTargetIonShare * total;
+            }
+
+            foreach (int m in members)
+                if (Starved(m)) return true;
+            return joining >= 0 && Starved(joining);
+        }
+
         // Read-only feasibility check: true iff `candIndex` could be merged
         // into some existing MTM slot right now without opening a new one.
         // Mirrors the merge-half of TrySchedule and MUST be kept in sync
@@ -278,6 +432,8 @@ public static class Scheduler
                         continue;
                     if (OverlapsOtherSlotBand(sid, newMzMin - prmHalf, newMzMax + prmHalf,
                                               newRtStartPad, newRtStopPad))
+                        continue;
+                    if (StarvesAnyTarget(newMzMin, newMzMax, slot.MemberIndices, candIndex))
                         continue;
 
                     return true;
@@ -361,6 +517,10 @@ public static class Scheduler
                         if (OverlapsOtherSlotBand(sid, newMzMin - prmHalf, newMzMax + prmHalf,
                                                   newRtStartPad, newRtStopPad))
                             continue;
+                        // Co-isolation: never add a member that would starve
+                        // itself or an existing one of the band's ion current.
+                        if (StarvesAnyTarget(newMzMin, newMzMax, slot.MemberIndices, candIndex))
+                            continue;
                         if (extLoFrom < extLoTo) RangeAddOne(slotsPerBin, extLoFrom, extLoTo);
                         if (extHiFrom < extHiTo) RangeAddOne(slotsPerBin, extHiFrom, extHiTo);
                         slot.RtStart = newRtStartPad;
@@ -390,6 +550,12 @@ public static class Scheduler
             // band cannot be placed disjointly; the caller falls through to
             // this protein's next candidate.
             if (OverlapsOtherSlotBand(-1, mz - prmHalf, mz + prmHalf, rtStartPad, rtStopPad)) return -1;
+            // A solo window is where the guard matters most: 30% of the slots in
+            // a real acquisition hold one target, and ~72% of those admitted more
+            // non-target than target current. Rejecting here makes the cover pass
+            // fall through to this protein's next candidate, which is the same
+            // fallback the RT-budget rule uses.
+            if (StarvesAnyTarget(mz, mz, noMembers, candIndex)) return -1;
             RangeAddOne(slotsPerBin, newA, newB);
             int newSid = slots.Count;
             var newSlot = new Slot
@@ -503,7 +669,7 @@ public static class Scheduler
         foreach (var g in allGroups) { scheduledPerGroup[g] = 0; }
         var coveredGroups = new HashSet<string>();
 
-        // Shrink-with-re-absorption (WindowPacking.Disjoint only).
+        // Shrink-with-re-absorption (MTM only).
         //
         // Greedy slots only ever GROW, so a precursor that cannot merge and
         // cannot open a disjoint window has nowhere to go and is dropped. This
@@ -638,6 +804,11 @@ public static class Scheduler
                 if (!(winPadStart < sRt1 && sRt0 < winPadStop)) continue;
                 if (winBandLo < sMax + prmHalf && sMin - prmHalf < winBandHi) return -1;
             }
+
+            // Co-isolation for the assembled window. Shrunk blockers only lose
+            // members and narrow their band, so their own share can only improve;
+            // the new window is the one that has to be re-checked.
+            if (StarvesAnyTarget(winLo, winHi, members, -1)) return -1;
 
             // Budget for the new window, checked before mutating anything.
             var (winA, winB) = RtToBinRange(winPadStart, winPadStop);
@@ -813,6 +984,8 @@ public static class Scheduler
                     : parameters.PeptideRanking;
             var queues = QueuesForTier(tier, tierRanking);
             var cursors = allGroups.ToDictionary(g => g, _ => 0);
+
+            RebuildBackgroundPool(tier);
 
             // Rebuild the disjoint-packing clash-barrier pool for this tier.
             // Experimental tier: only experimental precursors can bound an
@@ -1175,8 +1348,94 @@ public static class Scheduler
 
         int proteinsCovered = coveredGroups.Count;
 
+        // ---- passenger post-pass ----
+        //
+        // The greedy only ever considers a precursor as a DRIVER, i.e. as
+        // something the slot must grow to reach, and tests it against the slots
+        // that happened to exist at its protein's turn. So a precursor already
+        // sitting inside a finished band, eluting entirely inside its firing
+        // window, is free signal the schedule silently drops. Measured on the
+        // 08/03 HeLa GPF report: of 5,299 such precursors, 54.5% were excluded
+        // only by the same-charge rule, 26.2% by nothing at all (the slot that
+        // would have taken them was created after their protein's turn), and
+        // 7.3% by fragment clash - and 390 of the 2,229 uncovered protein
+        // groups were reachable this way for free.
+        //
+        // Admitting them changes nothing about the acquisition, so none of the
+        // driver-side rules apply: not the same-charge constraint (a passenger
+        // is fragmented at the slot's CE regardless of what the assay claims),
+        // not the fragment-clash check (it is co-isolated either way; refusing
+        // to list it removes nothing from the spectrum), not the growth bounds
+        // or neighbour-band probe (the band does not move), and not the
+        // per-protein cap (a passenger consumes no budget).
+        var passengerIdx = new List<int>();
+        var passengerSid = new List<int>();
+        var passengerClash = new List<bool>();
+        if (parameters.Mode == AcquisitionMode.Mtm && slots.Count > 0)
+        {
+            RebuildBackgroundPoolAll();
+            var driverSet = new HashSet<int>(scheduledIndices);
+            // Best (highest-share) home slot per candidate. Under slot-aware
+            // packing two concurrent bands never overlap, so a precursor
+            // contained in two firing windows is impossible in practice; the
+            // max keeps the choice well-defined regardless.
+            var bestHome = new Dictionary<int, (int Sid, double Share, bool Clash)>();
+            foreach (var slot in slots)
+            {
+                if (slot.MemberIndices.Count == 0) continue;
+                double lo = slot.MzMin - prmHalf, hi = slot.MzMax + prmHalf;
+                int from = LowerBound(bgAllMz, lo);
+
+                // Same overlap-weighted denominator the driver gate uses: a
+                // rider is judged against the current admitted while IT elutes,
+                // not against every area the band touches at any point.
+                double TotalFor(double s0, double s1)
+                {
+                    double t = 0.0;
+                    for (int k = from; k < bgAllMz.Length && bgAllMz[k] <= hi; k++)
+                    {
+                        double ov = Math.Min(bgAllRt1[k], s1) - Math.Max(bgAllRt0[k], s0);
+                        if (ov <= 0.0) continue;
+                        double dur = bgAllRt1[k] - bgAllRt0[k];
+                        t += dur > 0.0 ? bgAllQty[k] * Math.Min(1.0, ov / dur) : bgAllQty[k];
+                    }
+                    return t;
+                }
+
+                for (int k = from; k < bgAllMz.Length && bgAllMz[k] <= hi; k++)
+                {
+                    int ci = bgAllIdx[k];
+                    if (driverSet.Contains(ci)) continue;
+                    var c = candidates[ci];
+                    // Whole peak inside the firing window. Partial containment
+                    // is the single strongest predictor of a ridealong NOT being
+                    // re-identified (12% found at <25% containment against 64%
+                    // at full), because the window is only on for part of its
+                    // elution.
+                    if (!(c.RtStart >= slot.RtStart && c.RtStop <= slot.RtStop)) continue;
+                    double total = TotalFor(c.RtStart, c.RtStop);
+                    if (total <= 0.0) continue;
+                    double share = c.PrecursorQuantity / total;
+                    if (share < PassengerMinShare) continue;
+                    if (bestHome.TryGetValue(ci, out var prev) && prev.Share >= share) continue;
+                    bestHome[ci] = (slot.Id, share,
+                        FragmentClash.AnyWithin(c.Top4Fragments, slot.Fragments, parameters.FragmentTolDa));
+                }
+            }
+            foreach (var (ci, home) in bestHome.OrderBy(kv => kv.Key))
+            {
+                slots[home.Sid].PassengerIndices.Add(ci);
+                passengerIdx.Add(ci);
+                passengerSid.Add(home.Sid);
+                passengerClash.Add(home.Clash);
+            }
+        }
+
         return new ScheduleResult
         {
+            PassengerIndices = passengerIdx.ToArray(),
+            PassengerSlotIds = passengerSid.ToArray(),
+            PassengerClashesWithDriver = passengerClash.ToArray(),
             ScheduledIndices = scheduledIndices,
             ScheduledSlotIds = scheduledSlotIds,
             Slots = slots.ToArray(),

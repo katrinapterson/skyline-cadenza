@@ -27,12 +27,11 @@ public sealed class Slot
     public double MzMax { get; set; }
 
     /// <summary>
-    /// Hard floor on <see cref="MzMin"/> under
-    /// <see cref="WindowPacking.Disjoint"/>. Set from the nearest co-eluting,
+    /// Hard floor on <see cref="MzMin"/>. Set from the nearest co-eluting,
     /// clashing precursor BELOW this slot in the candidate pool: the emitted
     /// band reaches <c>PrmIsolationWidthTh / 2</c> past the edge member, so the
-    /// bound sits half a quadrupole width inside the barrier. Unbounded under
-    /// <see cref="WindowPacking.Legacy"/>.
+    /// bound sits half a quadrupole width inside the barrier. Unbounded in
+    /// PRM mode, where a slot holds one precursor and never grows.
     /// </summary>
     public double GrowLo { get; set; } = double.NegativeInfinity;
 
@@ -50,6 +49,23 @@ public sealed class Slot
 
     /// <summary>Unpadded co-elution intersection stop (min).</summary>
     public double CoStop { get; set; }
+
+    /// <summary>
+    /// Precursors that ride along in this slot: they fall inside the emitted
+    /// band and elute entirely within the firing window, so the quadrupole
+    /// already transmits them and they are fragmented in this scan whether or
+    /// not the assay asks for them.
+    /// </summary>
+    /// <remarks>
+    /// Passengers are NOT members. <see cref="MemberIndices"/> are the drivers:
+    /// they set <see cref="MzMin"/> / <see cref="MzMax"/>, the emitted
+    /// isolation width, the collision energy, and the cycle budget. Passengers
+    /// are admitted in a post-pass once the schedule is frozen and change none
+    /// of those, which is why they cost nothing and why the driver-side rules
+    /// that exist to shape a window (same charge per slot, fragment clash,
+    /// per-protein cap) do not apply to them.
+    /// </remarks>
+    public List<int> PassengerIndices { get; } = new();
 
     /// <summary>
     /// Union of all member top-4 fragments, sorted ascending. New joins must

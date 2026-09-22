@@ -1,13 +1,11 @@
 # Scheduler bug: window expansion co-isolates unchecked precursors
 
-Status: **fixed under `WindowPacking.Disjoint`; `Legacy` (the default) still has
-the bug.** Covered by
+Status: **fixed.** Slot-aware packing is the only behaviour; the `WindowPacking`
+toggle and its `Legacy` mode were removed. Covered by
 [`SchedulerWindowScopingTests.cs`](../src/SkylineCadenza.Tests/SchedulerWindowScopingTests.cs),
-which asserts the invariant holds under `Disjoint`, that `Legacy` still violates
-it (so the flag provably matters and a silent default change would be caught),
-that only physically unseparable co-isolations survive, that concurrent bands
-never overlap, and that PRM is unaffected. `Legacy` remains the default so the
-golden fixtures are untouched.
+which asserts the invariant holds, that only physically unseparable
+co-isolations survive, that concurrent bands never overlap, and that PRM is
+unaffected.
 
 ## Summary
 
@@ -89,10 +87,9 @@ This is the concrete motivation for making the interference check
   swallowing interferers &mdash; the m/z-sweep window construction described in
   the partition redesign.
 
-Until that lands, the member-scoped check remains the default behaviour and the
-golden fixtures are unchanged.
+The member-scoped check no longer ships: windows are always packed disjointly.
 
-## What `WindowPacking.Disjoint` actually does
+## What slot-aware packing actually does
 
 Two guards, with different lifetimes:
 
@@ -113,15 +110,26 @@ a fixed `PrmIsolationWidthTh`, so it never grows (the failure is impossible) and
 the non-overlap rule could only ever drop targets within a quad width of each
 other, which no window scheme can separate.
 
-## Measured cost (balanced_GPF, 4,698 precursors, 3,075 proteins, budget 100)
+## Measured cost
 
-| | Legacy | Disjoint |
+On balanced_GPF (4,698 precursors, 3,075 proteins, budget 100), against the
+member-scoped behaviour that used to be the default:
+
+| | member-scoped (removed) | slot-aware (current) |
 |---|---|---|
 | proteins covered | 3,075 | ~2,230 |
 | windows | 1,818 | ~1,300 |
 | peak concurrency | 100 | ~67 |
 | mean isolation width | 1.70 Th | 1.26 Th |
 | overlapping concurrent band pairs | 2,144-2,219 | **0** |
+
+Confirmed on the 08/03 HeLa GPF report (70,970 precursors, budget 100): 9,079
+targets / 5,525 proteins under the old member-scoped default against 6,476 /
+4,731 slot-aware, a 29% target and 14% protein reduction. The signal bought with
+it is large: the median target's share of its window's co-isolated ion current
+rises from 3.30% to 8.48%, and the fraction of windows where a target holds
+under 1% of the fill falls from 12.9% to 6.7%. See `MinTargetIonShare` in
+`CLAUDE.md` for the measurement.
 
 Overlap is eliminated outright and windows get materially narrower, at a cost of
 roughly 28% of protein coverage. The tell is peak concurrency falling well below
