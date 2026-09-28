@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SkylineCadenza.Core.Ingest;
+using SkylineCadenza.Core.Parsimony;
 using SkylineCadenza.Core.Scheduling;
 
 namespace SkylineCadenza.Cli;
@@ -25,6 +27,7 @@ public static class Program
     /// Entry point. Usage:
     ///   SkylineCadenzaCli schedule INPUT.json OUTPUT.json
     ///   SkylineCadenzaCli schedule - -        (stdin / stdout)
+    ///   SkylineCadenzaCli schedule-diann REPORT.parquet PARAMS.json OUTPUT.json
     /// </summary>
     public static async Task<int> Main(string[] args)
     {
@@ -39,6 +42,7 @@ public static class Program
             return args[0] switch
             {
                 "schedule" => await RunScheduleAsync(args.Skip(1).ToArray()),
+                "schedule-diann" => await RunScheduleDiannAsync(args.Skip(1).ToArray()),
                 "--help" or "-h" or "help" => Help(),
                 _ => UnknownVerb(args[0]),
             };
@@ -78,6 +82,63 @@ public static class Program
         {
             await File.WriteAllTextAsync(rest[1], JsonSerializer.Serialize(response, JsonOpts));
         }
+        return 0;
+    }
+
+    /// <summary>
+    /// Ingest a DIA-NN report.parquet through the same path the app's
+    /// DIA-NN-only Load uses (reader at the parameters' q-value cutoff,
+    /// parsimony, <see cref="CandidateBuilder.Build"/> on the report's own
+    /// fragments), schedule it, and write one row per scheduled precursor.
+    /// Lets offline analyses compare parameter settings on a real report
+    /// without re-implementing ingest.
+    /// </summary>
+    private static async Task<int> RunScheduleDiannAsync(string[] rest)
+    {
+        if (rest.Length != 3)
+        {
+            Console.Error.WriteLine("usage: SkylineCadenzaCli schedule-diann REPORT.parquet PARAMS.json OUTPUT.json");
+            return 64;
+        }
+
+        var paramDto = JsonSerializer.Deserialize<SchedulingParametersDto>(File.ReadAllText(rest[1]), JsonOpts);
+        var parameters = ToSchedulingParameters(paramDto);
+        var rows = await DiannParquetReader.LoadAsync(rest[0], parameters.QValueCutoff);
+        var parsimony = ParsimonyEngine.Assign(DiannParquetReader.BuildPeptideProteinMap(rows));
+        var candidates = CandidateBuilder.Build(rows, parsimony, new Dictionary<FragmentKey, FragmentIon[]>());
+        var result = Scheduler.Run(candidates, parameters);
+
+        var targets = new List<ScheduledTargetDto>(result.ScheduledIndices.Length);
+        for (int k = 0; k < result.ScheduledIndices.Length; k++)
+        {
+            var c = candidates[result.ScheduledIndices[k]];
+            var slot = result.Slots[result.ScheduledSlotIds[k]];
+            targets.Add(new ScheduledTargetDto
+            {
+                PrecursorId = c.PrecursorId,
+                StrippedSequence = c.StrippedSequence,
+                PrecursorCharge = c.PrecursorCharge,
+                ProteinGroup = c.ProteinGroup,
+                PrecursorMz = c.PrecursorMz,
+                PrecursorQuantity = c.PrecursorQuantity,
+                SlotId = slot.Id,
+                SlotMzMin = slot.MzMin,
+                SlotMzMax = slot.MzMax,
+                SlotRtStart = slot.RtStart,
+                SlotRtStop = slot.RtStop,
+                SlotSize = slot.MemberIndices.Count,
+            });
+        }
+        var response = new DiannScheduleResponse
+        {
+            PoolPrecursors = candidates.Count,
+            ProteinGroupsCovered = result.ProteinGroupsCovered,
+            Slots = result.Slots.Length,
+            Targets = targets.ToArray(),
+        };
+        await File.WriteAllTextAsync(rest[2], JsonSerializer.Serialize(response, JsonOpts));
+        Console.Error.WriteLine(
+            $"pool {candidates.Count:n0}  scheduled {targets.Count:n0}  proteins {result.ProteinGroupsCovered:n0}  slots {result.Slots.Length:n0}");
         return 0;
     }
 
@@ -129,6 +190,7 @@ public static class Program
             MaxPeptidesPerProtein = dto.MaxPeptidesPerProtein ?? 5,
             PeptideRankCap = dto.PeptideRankCap ?? 0,
             MinTargetIonShare = dto.MinTargetIonShare ?? 0.0,
+            BackgroundFragmentClash = dto.BackgroundFragmentClash ?? false,
             ProteinRanking = dto.ProteinRanking ?? ProteinPriority.SummedIntensity,
             PeptideRanking = dto.PeptideRanking ?? PeptidePriority.PrecursorQuantity,
             ChargeHandling = dto.ChargeHandling ?? ChargeHandling.SameChargePerSlot,
@@ -179,6 +241,8 @@ public static class Program
         Console.Error.WriteLine("Verbs:");
         Console.Error.WriteLine("  schedule INPUT.json OUTPUT.json   Run the scheduler.");
         Console.Error.WriteLine("                                     Pass '-' for stdin/stdout.");
+        Console.Error.WriteLine("  schedule-diann REPORT.parquet PARAMS.json OUTPUT.json");
+        Console.Error.WriteLine("                                     Ingest a DIA-NN report as the app does, then schedule.");
         Console.Error.WriteLine("  help                              Show this help.");
     }
 }
@@ -236,6 +300,7 @@ internal sealed class SchedulingParametersDto
     public int? MaxPeptidesPerProtein { get; set; }
     public int? PeptideRankCap { get; set; }
     public double? MinTargetIonShare { get; set; }
+    public bool? BackgroundFragmentClash { get; set; }
     public ProteinPriority? ProteinRanking { get; set; }
     public PeptidePriority? PeptideRanking { get; set; }
     public ChargeHandling? ChargeHandling { get; set; }
@@ -262,4 +327,28 @@ internal sealed class SlotDto
     public double CoStart { get; set; }
     public double CoStop { get; set; }
     public int[] MemberIndices { get; set; } = Array.Empty<int>();
+}
+
+internal sealed class DiannScheduleResponse
+{
+    public int PoolPrecursors { get; set; }
+    public int ProteinGroupsCovered { get; set; }
+    public int Slots { get; set; }
+    public ScheduledTargetDto[] Targets { get; set; } = Array.Empty<ScheduledTargetDto>();
+}
+
+internal sealed class ScheduledTargetDto
+{
+    public string PrecursorId { get; set; } = string.Empty;
+    public string StrippedSequence { get; set; } = string.Empty;
+    public int PrecursorCharge { get; set; }
+    public string ProteinGroup { get; set; } = string.Empty;
+    public double PrecursorMz { get; set; }
+    public double PrecursorQuantity { get; set; }
+    public int SlotId { get; set; }
+    public double SlotMzMin { get; set; }
+    public double SlotMzMax { get; set; }
+    public double SlotRtStart { get; set; }
+    public double SlotRtStop { get; set; }
+    public int SlotSize { get; set; }
 }

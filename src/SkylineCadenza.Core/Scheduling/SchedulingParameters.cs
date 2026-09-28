@@ -122,6 +122,25 @@ public sealed record SchedulingParameters
     /// </summary>
     public double MinTargetIonShare { get; init; } = 0.0;
 
+    /// <summary>
+    /// Fragment-level co-isolation gate (MTM only). When on, a placement is
+    /// refused if any member's top-4 fragment falls within
+    /// <see cref="FragmentTolDa"/> of a top-4 fragment of ANY other identified
+    /// precursor that co-elutes with it inside the slot's emitted band
+    /// (<c>MzMin - PrmIsolationWidthTh / 2</c> to
+    /// <c>MzMax + PrmIsolationWidthTh / 2</c>). This covers other drivers AND
+    /// never-scheduled background, which the driver-vs-driver clash check
+    /// cannot see. Every top-4 fragment of a target must be clean, where a
+    /// fragment counts as interfered once the overlap-weighted co-isolated
+    /// signal on it reaches 1% of its own signal (a fixed tolerance, not a
+    /// knob), so a far weaker background precursor does not block a target.
+    /// Only precursors with a measured quantity are counted as interferers.
+    ///
+    /// False (the default) keeps existing schedules and the golden fixtures
+    /// unchanged; the app always turns it on.
+    /// </summary>
+    public bool BackgroundFragmentClash { get; init; } = false;
+
     /// <summary>How to order the protein groups going into the assay.</summary>
     public ProteinPriority ProteinRanking { get; init; } = ProteinPriority.SummedIntensity;
 

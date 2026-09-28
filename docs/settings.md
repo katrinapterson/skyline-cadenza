@@ -71,6 +71,35 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
   within this tolerance. Tight tolerance = more aggressive clash
   rejection = more singleton slots = lower multiplexing efficiency.
 
+### Background fragment clash (always on, no control)
+
+- MTM only. The clash check above only compares a slot's own members. This
+  one also covers every identified precursor the quadrupole transmits with
+  them, including never-scheduled background. It looks at the identified
+  precursors that co-elute with a target inside the emitted band
+  (`MzMin - PrmIsolationWidthTh / 2` to `MzMax + PrmIsolationWidthTh / 2`)
+  and have a top-4 fragment within the fragment tolerance of one of the
+  target's top-4 fragments. Their signal on that fragment is added up, each
+  weighted by how much of its peak co-elutes with the target. The fragment
+  counts as interfered once that total reaches 1% of the fragment's own
+  signal (a fixed tolerance, not a setting), so a background precursor 1000x
+  weaker than the target does not block it. All four quantified fragments
+  must be clean, and a refused target falls through to its protein's next
+  peptide.
+- Signal per fragment is `PrecursorQuantity * Intensity / sum(Intensity)`.
+  Only identified precursors (quantity > 0) are known, so this is a lower
+  bound on the real interference.
+- Measured on the 08/03 HeLa GPF report (App defaults, truncated-FASTA
+  artefacts excluded; expected re-identification from a model fitted on the
+  acquired MTM run). MaximizeProteins went from 5,777 to 5,745 targets, from
+  ~5,090 to ~5,109 expected re-identified targets (88.1% to 88.9%), and from
+  ~3,865 to ~3,851 expected recovered proteins. Balanced went from 5,013 to
+  5,039 targets and from ~4,547 to ~4,592 expected re-identified (90.7% to
+  91.1%). Targets with a background hit on a top-4 fragment fell from about
+  24-28% of the schedule to 13-16%.
+- Code symbol: `SchedulingParameters.BackgroundFragmentClash` (false in
+  Core so the golden fixtures are unchanged; the App always sets it true).
+
 ## RT budget
 
 ### Cycle budget (concurrent slots per cycle)

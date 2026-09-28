@@ -46,6 +46,15 @@ public static class Scheduler
     /// </summary>
     private const double PassengerMinShare = 0.05;
 
+    /// <summary>
+    /// Co-isolated signal a target's top-4 fragment tolerates before it counts
+    /// as interfered, as a fraction of that fragment's own signal. Not
+    /// user-tunable. Without it, a background precursor 1000x weaker than the
+    /// target would disqualify it over a fragment coincidence too small to
+    /// distort the target's fragment ratios.
+    /// </summary>
+    private const double FragmentInterferenceTolerance = 0.01;
+
     public static ScheduleResult Run(
         IReadOnlyList<Candidate> candidates,
         SchedulingParameters parameters,
@@ -242,7 +251,10 @@ public static class Scheduler
         // candByMzBin: the experimental tier sees experimental precursors only,
         // so its schedule stays invariant to whether a Carafe library is
         // loaded, and the predicted tier sees everything.
-        bool interferenceGuard = parameters.MinTargetIonShare > 0.0;
+        bool shareGuard = parameters.MinTargetIonShare > 0.0;
+        bool fragmentGuard = parameters.BackgroundFragmentClash
+                             && parameters.Mode == AcquisitionMode.Mtm;
+        bool interferenceGuard = shareGuard || fragmentGuard;
         var noMembers = new List<int>();
         double[] bgMz = Array.Empty<double>();
         double[] bgRt0 = Array.Empty<double>();
@@ -341,30 +353,119 @@ public static class Scheduler
             return total;
         }
 
-        // True when ANY measured member of the prospective slot would hold less
-        // than MinTargetIonShare of the current admitted while it elutes.
+        // Top-4 fragments per candidate for the background fragment clash,
+        // sorted by m/z, each paired with its intensity as a fraction of the
+        // precursor's summed kept-fragment intensity. PrecursorQuantity * rel
+        // is then an absolute per-fragment signal on one scale for every
+        // candidate, whatever units the ingest path stored in
+        // FragmentIon.Intensity. Built only when the gate is on.
+        double[][] topMz = Array.Empty<double[]>(), topRel = Array.Empty<double[]>();
+        if (fragmentGuard)
+        {
+            topMz = new double[candidates.Count][];
+            topRel = new double[candidates.Count][];
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var fr = candidates[i].Fragments;
+                double sum = 0.0;
+                foreach (var f in fr) if (f.Intensity > 0.0) sum += f.Intensity;
+                // Fragments are intensity-descending, so the first four are
+                // the quantified ones (the same set Top4Fragments holds).
+                int take = Math.Min(4, fr.Length);
+                var mz = new double[take];
+                var rel = new double[take];
+                for (int k = 0; k < take; k++)
+                {
+                    mz[k] = fr[k].Mz;
+                    rel[k] = sum > 0.0 && fr[k].Intensity > 0.0 ? fr[k].Intensity / sum : 0.0;
+                }
+                Array.Sort(mz, rel);
+                topMz[i] = mz;
+                topRel[i] = rel;
+            }
+        }
+
+        // True when any of `self`'s top-4 fragments is interfered: the other
+        // identified precursors in [bandLo, bandHi] that co-elute with `self`
+        // and have a top-4 fragment within FragmentTolDa of it put at least
+        // FragmentInterferenceTolerance of that fragment's own signal on it.
+        //
+        // The driver-vs-driver clash check only sees the slot's own members,
+        // but a fragment is contaminated by whatever the quadrupole transmits.
+        // On the 08/03 HeLa MTM targets, 21% had a top-4 fragment hit by a
+        // NON-target co-isolated precursor (8% by another member), and those
+        // targets were re-identified less often and had worse fragment-ratio
+        // fidelity to the GPF DIA at matched abundance. So every pooled
+        // precursor in the band counts, drivers and background alike, each
+        // contributing w * Q_x * rel_x of its matching fragments with w the
+        // same overlap weight as CoIsolatedTotalFor. All four fragments must be
+        // clean. A target with no measured intensity cannot be compared, so any
+        // coincidence interferes with it. Only IDENTIFIED precursors are known,
+        // so this is a lower bound on the true interference.
+        bool HasInterferedFragment(double bandLo, double bandHi, int self)
+        {
+            var tMz = topMz[self];
+            if (tMz.Length == 0) return false;
+            var tRel = topRel[self];
+            var c = candidates[self];
+            double s0 = c.RtStart, s1 = c.RtStop;
+            double tol = parameters.FragmentTolDa;
+            Span<double> load = stackalloc double[4];
+            load.Clear();
+            for (int k = LowerBound(bgMz, bandLo); k < bgMz.Length && bgMz[k] <= bandHi; k++)
+            {
+                int xi = bgIdx[k];
+                if (xi == self) continue;
+                double ov = Math.Min(bgRt1[k], s1) - Math.Max(bgRt0[k], s0);
+                if (ov <= 0.0) continue;
+                var xMz = topMz[xi];
+                if (!FragmentClash.AnyWithin(tMz, xMz, tol)) continue;
+                double dur = bgRt1[k] - bgRt0[k];
+                double wq = bgQty[k] * (dur > 0.0 ? Math.Min(1.0, ov / dur) : 1.0);
+                var xRel = topRel[xi];
+                for (int f = 0; f < tMz.Length; f++)
+                    for (int j = 0; j < xMz.Length; j++)
+                        if (Math.Abs(xMz[j] - tMz[f]) <= tol)
+                            load[f] += wq * xRel[j];
+            }
+            for (int f = 0; f < tMz.Length; f++)
+            {
+                if (!(load[f] > 0.0)) continue;
+                double signal = c.PrecursorQuantity * tRel[f];
+                if (!(signal > 0.0) || load[f] >= FragmentInterferenceTolerance * signal)
+                    return true;
+            }
+            return false;
+        }
+
+        // True when ANY member of the prospective slot would fail a
+        // co-isolation gate: a measured member holding less than
+        // MinTargetIonShare of the current admitted while it elutes, or any
+        // member with an interfered top-4 fragment (see HasInterferedFragment).
         //
         // Checked per member rather than for the smallest one: once each member
         // has its own overlap-weighted denominator, the member with the smallest
         // area is no longer necessarily the worst off. A broad member can be
         // starved by an interferer that never touches a narrow one beside it.
-        bool StarvesAnyTarget(double mzMin, double mzMax, List<int> members, int joining)
+        bool FailsCoIsolation(double mzMin, double mzMax, List<int> members, int joining)
         {
             if (!interferenceGuard) return false;
             double lo = mzMin - prmHalf, hi = mzMax + prmHalf;
 
-            bool Starved(int ci)
+            bool Fails(int ci)
             {
+                if (fragmentGuard && HasInterferedFragment(lo, hi, ci)) return true;
+                if (!shareGuard) return false;
                 double q = candidates[ci].PrecursorQuantity;
-                // No measured intensity: nothing this check can speak to.
+                // No measured intensity: nothing the share check can speak to.
                 if (!(q > 0.0)) return false;
                 double total = CoIsolatedTotalFor(lo, hi, ci);
                 return total > 0.0 && q < parameters.MinTargetIonShare * total;
             }
 
             foreach (int m in members)
-                if (Starved(m)) return true;
-            return joining >= 0 && Starved(joining);
+                if (Fails(m)) return true;
+            return joining >= 0 && Fails(joining);
         }
 
         // Read-only feasibility check: true iff `candIndex` could be merged
@@ -433,7 +534,7 @@ public static class Scheduler
                     if (OverlapsOtherSlotBand(sid, newMzMin - prmHalf, newMzMax + prmHalf,
                                               newRtStartPad, newRtStopPad))
                         continue;
-                    if (StarvesAnyTarget(newMzMin, newMzMax, slot.MemberIndices, candIndex))
+                    if (FailsCoIsolation(newMzMin, newMzMax, slot.MemberIndices, candIndex))
                         continue;
 
                     return true;
@@ -519,7 +620,7 @@ public static class Scheduler
                             continue;
                         // Co-isolation: never add a member that would starve
                         // itself or an existing one of the band's ion current.
-                        if (StarvesAnyTarget(newMzMin, newMzMax, slot.MemberIndices, candIndex))
+                        if (FailsCoIsolation(newMzMin, newMzMax, slot.MemberIndices, candIndex))
                             continue;
                         if (extLoFrom < extLoTo) RangeAddOne(slotsPerBin, extLoFrom, extLoTo);
                         if (extHiFrom < extHiTo) RangeAddOne(slotsPerBin, extHiFrom, extHiTo);
@@ -555,7 +656,7 @@ public static class Scheduler
             // non-target than target current. Rejecting here makes the cover pass
             // fall through to this protein's next candidate, which is the same
             // fallback the RT-budget rule uses.
-            if (StarvesAnyTarget(mz, mz, noMembers, candIndex)) return -1;
+            if (FailsCoIsolation(mz, mz, noMembers, candIndex)) return -1;
             RangeAddOne(slotsPerBin, newA, newB);
             int newSid = slots.Count;
             var newSlot = new Slot
@@ -808,7 +909,7 @@ public static class Scheduler
             // Co-isolation for the assembled window. Shrunk blockers only lose
             // members and narrow their band, so their own share can only improve;
             // the new window is the one that has to be re-checked.
-            if (StarvesAnyTarget(winLo, winHi, members, -1)) return -1;
+            if (FailsCoIsolation(winLo, winHi, members, -1)) return -1;
 
             // Budget for the new window, checked before mutating anything.
             var (winA, winB) = RtToBinRange(winPadStart, winPadStop);

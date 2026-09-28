@@ -1333,6 +1333,9 @@ public partial class MainViewModel : ObservableObject
             MaxPeptidesPerProtein = MaxPeptidesPerProtein,
             PeptideRankCap = PeptideRankCap,
             MinTargetIonShare = MinTargetIonShare,
+            // Always on: every top-4 fragment of a target must carry under 1%
+            // co-isolated signal from identified precursors, background included.
+            BackgroundFragmentClash = true,
             ProteinRanking = ProteinRanking,
             PeptideRanking = PeptideRanking,
         };

@@ -1162,4 +1162,114 @@ public class SchedulerTests
         Assert.Single(result.ScheduledIndices);
         Assert.Equal("target", cands[result.ScheduledIndices[0]].PrecursorId);
     }
+
+    // Background fragment-clash fixtures. The share gate is left off so only
+    // the fragment gate can reject.
+    private static SchedulingParameters FragmentGateParams(bool on, params string[] targets) => new()
+    {
+        CycleBudget = 100,
+        BackgroundFragmentClash = on,
+        TargetProteins = new HashSet<string>(targets),
+        TargetMode = TargetListMode.Exclusive,
+    };
+
+    // A lone target plus one never-scheduled background precursor inside its
+    // solo band (500.0 +/- 0.35) whose top fragment sits 0.2 Da from the
+    // target's 100.0 fragment and nowhere near the others.
+    private static Candidate[] FragmentGatePool(
+        double bgQuantity = 1e6, double bgMz = 500.2, double bgRtStart = 5.0, double bgRtStop = 5.4) => new[]
+    {
+        Make("target", 500.0, 5.0, 5.4, "G1", quantity: 1e6,
+             fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        Make("bg", bgMz, bgRtStart, bgRtStop, "BG", quantity: bgQuantity,
+             fragments: new[] { 100.2, 600.0, 700.0, 800.0 }),
+    };
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_RejectsSoloWindowWithBackgroundOnATargetFragment()
+    {
+        // bg is not a slot member, so the driver clash check never sees it;
+        // only the band-wide fragment gate can.
+        var result = Scheduler.Run(FragmentGatePool(), FragmentGateParams(true, "G1"));
+
+        Assert.Empty(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_ToleratesBackgroundUnderOnePercentOfTheFragment()
+    {
+        // Make() gives intensities 4:3:2:1, so both precursors' clashing
+        // fragment carries 0.4 * quantity. A background 1000x weaker than the
+        // target puts 0.1% of the fragment's signal on it: tolerated.
+        var cands = FragmentGatePool(bgQuantity: 1e3);
+
+        var result = Scheduler.Run(cands, FragmentGateParams(true, "G1"));
+
+        Assert.Single(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_RejectsBackgroundAtOrAboveOnePercentOfTheFragment()
+    {
+        // 20x weaker still puts 5% of the fragment's signal on it: interfered.
+        var result = Scheduler.Run(FragmentGatePool(bgQuantity: 5e4), FragmentGateParams(true, "G1"));
+
+        Assert.Empty(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_IgnoresPrecursorsOutsideTheEmittedBand()
+    {
+        // Moved to 500.5, past the solo band's 500.35 edge: the quadrupole
+        // never transmits it.
+        var cands = FragmentGatePool(bgMz: 500.5);
+
+        var result = Scheduler.Run(cands, FragmentGateParams(true, "G1"));
+
+        Assert.Single(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_IgnoresBackgroundThatDoesNotCoElute()
+    {
+        var cands = FragmentGatePool(bgRtStart: 7.0, bgRtStop: 7.4);
+
+        var result = Scheduler.Run(cands, FragmentGateParams(true, "G1"));
+
+        Assert.Single(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClashOff_LeavesSchedulingUnchanged()
+    {
+        var result = Scheduler.Run(FragmentGatePool(), FragmentGateParams(false, "G1"));
+
+        Assert.Single(result.ScheduledIndices);
+    }
+
+    [Fact]
+    public void Scheduler_BackgroundFragmentClash_BlocksJoinThatWouldCoIsolateClashingBackground()
+    {
+        // "a" (500.00) and "b" (501.25) merge into one window when the gate is
+        // off. The background at 500.60 lies only inside the MERGED band and
+        // lands on b's 150.0 fragment, so with the gate on the join is refused
+        // and each target gets its own window.
+        var cands = new[]
+        {
+            Make("a", 500.00, 5.0, 5.4, "G1", quantity: 1e6,
+                 fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("b", 501.25, 5.1, 5.5, "G2", quantity: 1e5,
+                 fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+            Make("bg", 500.60, 5.0, 5.5, "BG", quantity: 1e5,
+                 fragments: new[] { 150.1, 610.0, 710.0, 810.0 }),
+        };
+
+        var off = Scheduler.Run(cands, FragmentGateParams(false, "G1", "G2"));
+        Assert.Contains(off.Slots, s => s.MemberIndices.Count == 2);
+
+        var on = Scheduler.Run(cands, FragmentGateParams(true, "G1", "G2"));
+        var scheduled = on.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet();
+        Assert.Equal(new HashSet<string> { "a", "b" }, scheduled);
+        Assert.DoesNotContain(on.Slots, s => s.MemberIndices.Count > 1);
+    }
 }
