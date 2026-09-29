@@ -133,6 +133,12 @@ public static class Scheduler
         }
 
         var slots = new List<Slot>();
+
+        // Forced peptides (SchedulingParameters.ForcedPeptides) scheduled so
+        // far. Their windows are ordinary windows - the fill may join or reshape
+        // them under the normal rules - but shrink-and-place never leaves a
+        // forced precursor homeless.
+        var forcedIdx = new HashSet<int>();
         var slotByMzBin = new Dictionary<int, List<int>>();
 
         void RegisterSlotMzBins(int sid, double mzMin, double mzMax)
@@ -440,8 +446,9 @@ public static class Scheduler
 
         // True when ANY member of the prospective slot would fail a
         // co-isolation gate: a measured member holding less than
-        // MinTargetIonShare of the current admitted while it elutes, or any
-        // member with an interfered top-4 fragment (see HasInterferedFragment).
+        // MinTargetIonShare of the current admitted while it elutes, any
+        // member with an interfered top-4 fragment (see HasInterferedFragment),
+        // or a slot that would hold more than MaxTargetsPerSlot targets.
         //
         // Checked per member rather than for the smallest one: once each member
         // has its own overlap-weighted denominator, the member with the smallest
@@ -449,6 +456,11 @@ public static class Scheduler
         // starved by an interferer that never touches a narrow one beside it.
         bool FailsCoIsolation(double mzMin, double mzMax, List<int> members, int joining)
         {
+            // Target cap: drivers only. Untargeted precursors and passengers
+            // are not targets, so they never count against it.
+            if (parameters.MaxTargetsPerSlot > 0
+                && members.Count + (joining >= 0 ? 1 : 0) > parameters.MaxTargetsPerSlot)
+                return true;
             if (!interferenceGuard) return false;
             double lo = mzMin - prmHalf, hi = mzMax + prmHalf;
 
@@ -644,6 +656,20 @@ public static class Scheduler
             }
 
             // No existing slot accepted - open a new one if there's budget.
+            return TryOpenSlot(candIndex);
+        }
+
+        // Open a new solo window for `candIndex` if budget, disjoint packing and
+        // co-isolation allow. Returns the new slot id, or -1.
+        int TryOpenSlot(int candIndex)
+        {
+            var prec = candidates[candIndex];
+            double mz = prec.PrecursorMz;
+            double rtStart = prec.RtStart;
+            double rtStop = prec.RtStop;
+            double rtStartPad = rtStart - padMin;
+            double rtStopPad = rtStop + padMin;
+            var frags = prec.Top4Fragments;
             var (newA, newB) = RtToBinRange(rtStartPad, rtStopPad);
             if (newA >= newB) return -1;
             if (RangeMax(slotsPerBin, newA, newB) + 1 > parameters.CycleBudget) return -1;
@@ -880,6 +906,9 @@ public static class Scheduler
                 else homeless.Add(e);
             }
 
+            // A forced precursor is never displaced to make room.
+            if (homeless.Exists(forcedIdx.Contains)) return -1;
+
             // Never un-cover a protein to make room.
             foreach (int h in homeless)
                 if (scheduledPerGroup.TryGetValue(candidates[h].ProteinGroup, out int n) && n <= 1)
@@ -1051,6 +1080,125 @@ public static class Scheduler
             }
         }
 
+        PeptidePriority RankingFor(CandidateSource tier) =>
+            tier == CandidateSource.Predicted
+                ? PeptidePriority.PredictedRanking
+            : parameters.PeptideRanking == PeptidePriority.PredictedRanking
+                    && !experimentalHasPredictedScore
+                ? PeptidePriority.PrecursorQuantity
+                : parameters.PeptideRanking;
+
+        // Rebuild the disjoint-packing clash-barrier pool for a tier.
+        // Experimental tier: only experimental precursors can bound an
+        // experimental slot's growth, so the bounds (and the schedule) don't
+        // depend on the predicted pool. Predicted tier: every precursor is a
+        // real interferer for a predicted slot, so the pool is the full set.
+        void RebuildBarrierPool(CandidateSource tier)
+        {
+            if (!disjointPacking) return;
+            candByMzBin.Clear();
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (tier == CandidateSource.Experimental
+                    && candidates[i].Source != CandidateSource.Experimental) continue;
+                int bin = (int)Math.Floor(candidates[i].PrecursorMz);
+                if (!candByMzBin.TryGetValue(bin, out var list))
+                {
+                    list = new List<int>();
+                    candByMzBin[bin] = list;
+                }
+                list.Add(i);
+            }
+        }
+
+        // ---- forced pass ----
+        //
+        // Forced peptides are placed before either tier, so they get first
+        // claim on the cycle budget, and the cover / load-up fill works around
+        // them. Each is placed exactly as any other precursor would be under
+        // the given parameters (join a compatible window, else open one, else
+        // shrink-and-place), with every quality and instrument rule applied, so
+        // a core set carried across schedules is scheduled the way each
+        // schedule's own settings dictate. A peptide given without a charge is
+        // attempted charge state by charge state in rank order, in rounds:
+        // every entry tries its best charge before any entry falls back to its
+        // second, so one entry's fallback never takes budget another entry's
+        // best charge needed. Each attempt uses the pools of its own tier, so a
+        // confirmed forced peptide is judged exactly as it would be with no
+        // Carafe library loaded.
+        var forcedOutcomes = new ForcedPeptideOutcome[parameters.ForcedPeptides.Count];
+        if (parameters.ForcedPeptides.Count > 0)
+        {
+            var options = new List<int>[forcedOutcomes.Length];
+            for (int f = 0; f < forcedOutcomes.Length; f++)
+            {
+                var spec = parameters.ForcedPeptides[f];
+                var exp = new List<int>();
+                var pred = new List<int>();
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    if (!ForcedPeptides.Matches(spec, candidates[i])) continue;
+                    (candidates[i].Source == CandidateSource.Predicted ? pred : exp).Add(i);
+                }
+                var expRank = RankingFor(CandidateSource.Experimental);
+                exp.Sort((x, y) => RankCompare(x, y, expRank));
+                pred.Sort((x, y) => RankCompare(x, y, PeptidePriority.PredictedRanking));
+                exp.AddRange(pred);
+                options[f] = exp;
+                forcedOutcomes[f] = new ForcedPeptideOutcome(
+                    spec, exp.Count == 0 ? ForcedPeptideStatus.NotInPool : ForcedPeptideStatus.Rejected,
+                    -1, false);
+            }
+
+            CandidateSource? context = null;
+            void UseContext(CandidateSource tier)
+            {
+                if (context == tier) return;
+                RebuildBackgroundPool(tier);
+                RebuildBarrierPool(tier);
+                context = tier;
+            }
+
+            int rounds = options.Max(o => o.Count);
+            for (int round = 0; round < rounds; round++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                // Within a round, confirmed attempts before predicted ones.
+                foreach (var tier in new[] { CandidateSource.Experimental, CandidateSource.Predicted })
+                {
+                    for (int f = 0; f < forcedOutcomes.Length; f++)
+                    {
+                        if (forcedOutcomes[f].Status != ForcedPeptideStatus.Rejected) continue;
+                        if (round >= options[f].Count) continue;
+                        int ci = options[f][round];
+                        if (candidates[ci].Source != tier) continue;
+                        if (scheduledToSlot.ContainsKey(ci))
+                        {
+                            // Another entry already forced this precursor.
+                            forcedOutcomes[f] = forcedOutcomes[f] with
+                            {
+                                Status = ForcedPeptideStatus.Scheduled, CandidateIndex = ci, UsedFallbackCharge = round > 0,
+                            };
+                            continue;
+                        }
+                        UseContext(tier);
+                        int sid = Place(ci);
+                        if (sid < 0) continue;
+
+                        scheduledToSlot[ci] = sid;
+                        forcedIdx.Add(ci);
+                        string g = candidates[ci].ProteinGroup;
+                        scheduledPerGroup[g] = (scheduledPerGroup.TryGetValue(g, out int n) ? n : 0) + 1;
+                        coveredGroups.Add(g);
+                        forcedOutcomes[f] = forcedOutcomes[f] with
+                        {
+                            Status = ForcedPeptideStatus.Scheduled, CandidateIndex = ci, UsedFallbackCharge = round > 0,
+                        };
+                    }
+                }
+            }
+        }
+
         // Two-tier scheduling. Schedule every Experimental (measured) candidate
         // first via the full cover + load-up, then let Predicted (Carafe
         // backfill) candidates reuse whatever cycle budget is left. The shared
@@ -1076,39 +1224,13 @@ public static class Scheduler
             //    they aren't collapsed to a PrecursorId tie. A Carafe-only pool
             //    tags its predicted peptides Experimental but DOES give them
             //    scores, so it keeps PredictedRanking (experimentalHasPredictedScore).
-            var tierRanking =
-                tier == CandidateSource.Predicted
-                    ? PeptidePriority.PredictedRanking
-                : parameters.PeptideRanking == PeptidePriority.PredictedRanking
-                        && !experimentalHasPredictedScore
-                    ? PeptidePriority.PrecursorQuantity
-                    : parameters.PeptideRanking;
+            var tierRanking = RankingFor(tier);
             var queues = QueuesForTier(tier, tierRanking);
             var cursors = allGroups.ToDictionary(g => g, _ => 0);
 
             RebuildBackgroundPool(tier);
 
-            // Rebuild the disjoint-packing clash-barrier pool for this tier.
-            // Experimental tier: only experimental precursors can bound an
-            // experimental slot's growth, so the bounds (and the schedule) don't
-            // depend on the predicted pool. Predicted tier: every precursor is a
-            // real interferer for a predicted slot, so the pool is the full set.
-            if (disjointPacking)
-            {
-                candByMzBin.Clear();
-                for (int i = 0; i < candidates.Count; i++)
-                {
-                    if (tier == CandidateSource.Experimental
-                        && candidates[i].Source != CandidateSource.Experimental) continue;
-                    int bin = (int)Math.Floor(candidates[i].PrecursorMz);
-                    if (!candByMzBin.TryGetValue(bin, out var list))
-                    {
-                        list = new List<int>();
-                        candByMzBin[bin] = list;
-                    }
-                    list.Add(i);
-                }
-            }
+            RebuildBarrierPool(tier);
 
             // Per-tier group ordering. Priority metric (summed intensity / best
             // q-value) and the smallest-group tiebreaker are computed over THIS
@@ -1357,8 +1479,10 @@ public static class Scheduler
                 groupCounts[g] = (groupCounts.TryGetValue(g, out int n) ? n : 0) + 1;
             }
             var failedGroups = new HashSet<string>();
+            var forcedGroups = new HashSet<string>(forcedIdx.Select(i => candidates[i].ProteinGroup));
             foreach (var kv in groupCounts)
-                if (kv.Value < parameters.MinPeptidesPerProtein) failedGroups.Add(kv.Key);
+                if (kv.Value < parameters.MinPeptidesPerProtein && !forcedGroups.Contains(kv.Key))
+                    failedGroups.Add(kv.Key);
 
             if (failedGroups.Count > 0)
             {
@@ -1543,6 +1667,7 @@ public static class Scheduler
             RtGrid = rtGrid,
             SlotCountCurve = slotsPerBin,
             ProteinGroupsCovered = proteinsCovered,
+            ForcedOutcomes = forcedOutcomes,
         };
     }
 }

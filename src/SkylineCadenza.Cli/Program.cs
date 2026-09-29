@@ -135,6 +135,13 @@ public static class Program
             ProteinGroupsCovered = result.ProteinGroupsCovered,
             Slots = result.Slots.Length,
             Targets = targets.ToArray(),
+            Forced = result.ForcedOutcomes.Select(o => new ForcedOutcomeDto
+            {
+                Entry = o.Spec.Text,
+                Status = o.Status.ToString(),
+                PrecursorId = o.CandidateIndex >= 0 ? candidates[o.CandidateIndex].PrecursorId : null,
+                UsedFallbackCharge = o.UsedFallbackCharge,
+            }).ToArray(),
         };
         await File.WriteAllTextAsync(rest[2], JsonSerializer.Serialize(response, JsonOpts));
         Console.Error.WriteLine(
@@ -190,7 +197,9 @@ public static class Program
             MaxPeptidesPerProtein = dto.MaxPeptidesPerProtein ?? 5,
             PeptideRankCap = dto.PeptideRankCap ?? 0,
             MinTargetIonShare = dto.MinTargetIonShare ?? 0.0,
+            MaxTargetsPerSlot = dto.MaxTargetsPerSlot ?? 0,
             BackgroundFragmentClash = dto.BackgroundFragmentClash ?? false,
+            ForcedPeptides = ForcedPeptides.Parse(string.Join('\n', dto.ForcedPeptides ?? Array.Empty<string>()), out _),
             ProteinRanking = dto.ProteinRanking ?? ProteinPriority.SummedIntensity,
             PeptideRanking = dto.PeptideRanking ?? PeptidePriority.PrecursorQuantity,
             ChargeHandling = dto.ChargeHandling ?? ChargeHandling.SameChargePerSlot,
@@ -300,7 +309,10 @@ internal sealed class SchedulingParametersDto
     public int? MaxPeptidesPerProtein { get; set; }
     public int? PeptideRankCap { get; set; }
     public double? MinTargetIonShare { get; set; }
+    public int? MaxTargetsPerSlot { get; set; }
     public bool? BackgroundFragmentClash { get; set; }
+    /// <summary>Forced peptide entries, one per element, same syntax as the app's box.</summary>
+    public string[]? ForcedPeptides { get; set; }
     public ProteinPriority? ProteinRanking { get; set; }
     public PeptidePriority? PeptideRanking { get; set; }
     public ChargeHandling? ChargeHandling { get; set; }
@@ -335,6 +347,15 @@ internal sealed class DiannScheduleResponse
     public int ProteinGroupsCovered { get; set; }
     public int Slots { get; set; }
     public ScheduledTargetDto[] Targets { get; set; } = Array.Empty<ScheduledTargetDto>();
+    public ForcedOutcomeDto[] Forced { get; set; } = Array.Empty<ForcedOutcomeDto>();
+}
+
+internal sealed class ForcedOutcomeDto
+{
+    public string Entry { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public string? PrecursorId { get; set; }
+    public bool UsedFallbackCharge { get; set; }
 }
 
 internal sealed class ScheduledTargetDto

@@ -94,6 +94,21 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private double _minTargetIonShare = 0.015;
 
     /// <summary>
+    /// Maximum targeted precursors per MTM slot. 0 disables the cap, the
+    /// default. See <see cref="SchedulingParameters.MaxTargetsPerSlot"/>.
+    /// </summary>
+    [ObservableProperty] private int _maxTargetsPerSlot;
+
+    /// <summary>
+    /// Peptides to schedule before anything else (one per line, optional
+    /// charge). See <see cref="SchedulingParameters.ForcedPeptides"/>.
+    /// </summary>
+    [ObservableProperty] private string? _forcedPeptidesText;
+
+    /// <summary>Outcome of the forced list for the last schedule, shown under the box.</summary>
+    [ObservableProperty] private string _forcedPeptidesSummary = string.Empty;
+
+    /// <summary>
     /// Include passengers when pushing to Skyline. Passengers already ride in
     /// the scheduled windows, so this changes only what the document extracts,
     /// never the acquisition: the exported Thermo method is identical either
@@ -910,6 +925,21 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void BrowseForcedPeptides()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "Peptide list (*.txt;*.csv;*.tsv)|*.txt;*.csv;*.tsv|All files (*.*)|*.*",
+            Title = "Open forced peptide list (one peptide per line, optional charge)",
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            try { ForcedPeptidesText = File.ReadAllText(dlg.FileName); }
+            catch (Exception ex) { StatusMessage = $"Could not read {dlg.FileName}: {ex.Message}"; }
+        }
+    }
+
+    [RelayCommand]
     private void BrowseTargetList()
     {
         var dlg = new OpenFileDialog
@@ -1293,7 +1323,27 @@ public partial class MainViewModel : ObservableObject
         }
 
         StatusMessage = $"Scheduled {ScheduledPrecursors:n0} precursors / {ScheduledPeptides:n0} peptides covering {ProteinsCovered:n0}/{_knownAccessions?.Count:n0} groups in {SlotsTotal:n0} slots (peak load {PeakLoad}/{p.CycleBudget}).";
+        ForcedPeptidesSummary = SummarizeForced(result.ForcedOutcomes);
+        if (result.ForcedOutcomes.Length > 0) StatusMessage += " " + ForcedPeptidesSummary;
         ScheduleUpdated?.Invoke();
+    }
+
+    // One line for the status bar, naming the entries that did not make it.
+    private string SummarizeForced(ForcedPeptideOutcome[] outcomes)
+    {
+        if (outcomes.Length == 0)
+            return _forcedInvalid.Count > 0 ? $"Forced: {_forcedInvalid.Count} unreadable line(s)." : string.Empty;
+        int ok = outcomes.Count(o => o.Status == ForcedPeptideStatus.Scheduled);
+        int fallback = outcomes.Count(o => o.Status == ForcedPeptideStatus.Scheduled && o.UsedFallbackCharge);
+        var missing = outcomes.Where(o => o.Status == ForcedPeptideStatus.NotInPool).Select(o => o.Spec.Text).ToList();
+        var rejected = outcomes.Where(o => o.Status == ForcedPeptideStatus.Rejected).Select(o => o.Spec.Text).ToList();
+        static string Few(List<string> xs) => string.Join(", ", xs.Take(5)) + (xs.Count > 5 ? ", ..." : "");
+        var sb = new System.Text.StringBuilder($"Forced: {ok}/{outcomes.Length} scheduled");
+        if (fallback > 0) sb.Append($" ({fallback} on a fallback charge)");
+        if (missing.Count > 0) sb.Append($"; {missing.Count} not in library ({Few(missing)})");
+        if (rejected.Count > 0) sb.Append($"; {rejected.Count} failed the scheduling rules ({Few(rejected)})");
+        if (_forcedInvalid.Count > 0) sb.Append($"; {_forcedInvalid.Count} unreadable line(s)");
+        return sb.Append('.').ToString();
     }
 
     partial void OnHeatmapViewChanged(HeatmapView value)
@@ -1305,6 +1355,8 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Fires when the heatmap view toggle changes, so the View can re-render.</summary>
     public event Action? HeatmapViewChanged;
 
+    private List<string> _forcedInvalid = new();
+
     private SchedulingParameters CurrentParameters()
     {
         var targets = new HashSet<string>();
@@ -1315,8 +1367,10 @@ public partial class MainViewModel : ObservableObject
             foreach (var t in resolved) targets.Add(t);
         }
         TargetProteinsParsedCount = targets.Count;
+        var forced = ForcedPeptides.Parse(ForcedPeptidesText, out _forcedInvalid);
         return new SchedulingParameters
         {
+            ForcedPeptides = forced,
             Mode = Mode,
             Objective = Objective,
             IsolationWindowTh = IsolationWindowTh,
@@ -1333,6 +1387,7 @@ public partial class MainViewModel : ObservableObject
             MaxPeptidesPerProtein = MaxPeptidesPerProtein,
             PeptideRankCap = PeptideRankCap,
             MinTargetIonShare = MinTargetIonShare,
+            MaxTargetsPerSlot = MaxTargetsPerSlot,
             // Always on: every top-4 fragment of a target must carry under 1%
             // co-isolated signal from identified precursors, background included.
             BackgroundFragmentClash = true,
@@ -1365,6 +1420,7 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnPrmIsolationWidthThChanged(double value) => _ = RescheduleAsync();
     partial void OnMinTargetIonShareChanged(double value) => _ = RescheduleAsync();
+    partial void OnMaxTargetsPerSlotChanged(int value) => _ = RescheduleAsync();
     partial void OnChargeHandlingChanged(ChargeHandling value) => _ = RescheduleAsync();
     // NormalizedCollisionEnergy is output-only - no reschedule.
     partial void OnMinPeptidesPerProteinChanged(int value) => _ = RescheduleAsync();
@@ -1374,6 +1430,7 @@ public partial class MainViewModel : ObservableObject
     partial void OnPeptideRankingChanged(PeptidePriority value) => _ = RescheduleAsync();
     partial void OnTargetModeChanged(TargetListMode value) => _ = RescheduleAsync();
     partial void OnTargetProteinsTextChanged(string value) => _ = RescheduleAsync();
+    partial void OnForcedPeptidesTextChanged(string? value) => _ = RescheduleAsync();
 }
 
 /// <summary>One row in the protein-coverage plot's data series.</summary>

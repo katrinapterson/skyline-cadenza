@@ -100,6 +100,17 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
 - Code symbol: `SchedulingParameters.BackgroundFragmentClash` (false in
   Core so the golden fixtures are unchanged; the App always sets it true).
 
+### Max targets per slot
+
+- Default: 0 (no cap).
+- Maximum number of targeted precursors (drivers) one MTM slot may hold. A
+  join into a full slot is refused, so the target goes to another slot,
+  opens a solo slot, or falls through to its protein's next peptide.
+- Untargeted co-isolated precursors and passengers do not count.
+- Enforced alongside the co-isolation gates (join, look-ahead join check,
+  shrink-and-place; a new solo slot always holds one target).
+- Code symbol: `SchedulingParameters.MaxTargetsPerSlot`.
+
 ## RT budget
 
 ### Cycle budget (concurrent slots per cycle)
@@ -294,6 +305,46 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
   order they were supplied), then the remaining budget fills with
   off-list proteins in the regular priority order.
 - Ignored when the target list is empty.
+
+## Forced peptides
+
+### Forced peptides (multi-line text box + "Open peptide list...")
+
+- Default: empty (no effect).
+- Peptides placed before anything else, so the same validation or
+  intentionally targeted peptides can be carried across different
+  schedules. The normal cover and load-up passes then fill the rest of the
+  schedule around them.
+- One entry per line: `PEPTIDEK` (any charge), `PEPTIDEK+2`, `PEPTIDEK/2`,
+  `PEPTIDEK++`, or a charge in a second comma / tab / space separated column.
+  Modified sequences in Skyline, DIA-NN or Carafe syntax must match the
+  modifications (masses compared to two decimals); an unmodified entry
+  matches every modified form. Blank lines, `#` comments and header rows are
+  skipped.
+- Forced peptides obey every quality and instrument rule: the ion-share
+  floor, the background fragment clash, the member fragment clash, window
+  geometry and the cycle budget. They ignore the breadth rules: ranking, the
+  rank cap, max and min peptides per protein, and an exclusive target list.
+- Each forced precursor is placed the normal way under the schedule's own
+  parameters: join a compatible window, else open a new one, else
+  shrink-and-place. So a core set carried across schedules is scheduled the
+  way each schedule's settings dictate, which is what makes the schedules
+  comparable. A peptide without a charge tries its best-ranked charge state
+  first. If that fails the rules, it falls back to its other charge states,
+  in rounds, so no entry's fallback takes budget another entry's best charge
+  needed. The fill then treats forced windows like any other window: other
+  targets may join or reshape them under the same rules, but the fill's
+  shrink-and-place never drops a forced precursor.
+- The status line reports how many entries were scheduled (and how many on
+  a fallback charge), which are not in the library (no identification, so
+  no RT), and which failed the rules.
+- Measured on the 08/26 HeLa GPF report: 30 random peptides the normal
+  schedule did not pick were forced. 28 were scheduled (1 on a fallback
+  charge). The other 2 failed the background fragment clash in their own
+  solo windows. The fill still reached 5,093 targets and 3,704 proteins,
+  against 4,915 and 3,688 without forcing.
+- Code symbols: `SchedulingParameters.ForcedPeptides`,
+  `ForcedPeptides.Parse`, `ScheduleResult.ForcedOutcomes`.
 
 ## Skyline integration (read-side)
 

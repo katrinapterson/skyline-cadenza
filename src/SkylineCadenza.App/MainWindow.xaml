@@ -102,6 +102,16 @@
                 <RadioButton Content="Exclusive (target list only)" GroupName="targetMode"
                              IsChecked="{Binding TargetMode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:TargetListMode.Exclusive}}"/>
 
+                <!-- Forced peptides -->
+                <TextBlock Text="Forced peptides" FontWeight="Bold" Margin="0,12,0,4"/>
+                <TextBlock Text="Scheduled before everything else, one per line (PEPTIDEK, PEPTIDEK+2, or a charge column). Or:" TextWrapping="Wrap" FontSize="11" Opacity="0.7"/>
+                <Button Content="Open peptide list..." Command="{Binding BrowseForcedPeptidesCommand}" HorizontalAlignment="Left" Margin="0,2,0,4"/>
+                <TextBox Text="{Binding ForcedPeptidesText, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                         Height="60" FontFamily="Consolas" FontSize="11"
+                         ToolTip="Each forced peptide is placed before the normal fill, ignoring ranking, the rank cap, the per-protein max/min and an exclusive target list. It still has to pass every quality rule (ion-share floor, fragment interference, window geometry, cycle budget) and is placed the normal way: join a compatible window, else open one, else shrink-and-place. A peptide without a charge tries its best charge state first, then the others. The rest of the schedule then fills in around them under the same rules; it may share their windows but can never drop a forced peptide."/>
+                <TextBlock Text="{Binding ForcedPeptidesSummary}" TextWrapping="Wrap" FontSize="11" Opacity="0.7" Margin="0,2,0,4"/>
+
                 <!-- Acquisition mode -->
                 <TextBlock Text="Acquisition mode" FontWeight="Bold" Margin="0,16,0,4"/>
                 <RadioButton Content="MTM (multiplex)" GroupName="mode"
@@ -132,6 +142,10 @@
                 <TextBlock Text="{Binding MinTargetIonShare, StringFormat='Minimum target share of window current: {0:P1} (0 = off)'}" Margin="0,4,0,0"
                            ToolTip="Refuses to place a target into a window where competing ions would take so much of the fill that it cannot be quantified. Every target in the slot is checked over its own elution, and each competitor counts only the part of its peak that actually co-elutes with that target - so a huge neighbour clipping the edge of a peak is not treated the same as one sitting on top of it. The denominator is every identified precursor in the emitted band, not just the scheduled targets: on a real HeLa MTM acquisition ~66% of the current inside the target windows came from precursors that were never targets. Raising this trades protein coverage for usable signal on the targets that remain. Counts identified precursors only, so it is a lower bound on the true competition."/>
                 <Slider Minimum="0" Maximum="0.30" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding MinTargetIonShare}"/>
+
+                <TextBlock Text="{Binding MaxTargetsPerSlot, StringFormat='Max targets per slot: {0} (0 = no cap)'}" Margin="0,4,0,0"
+                           ToolTip="Caps how many targeted precursors one MTM window may multiplex. Once a window is full, a target that would have joined it goes to another window, opens its own, or falls through to its protein's next peptide. Untargeted co-isolated precursors and passengers do not count against the cap."/>
+                <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MaxTargetsPerSlot}"/>
 
                 <TextBlock Text="Charge handling per slot" Margin="0,8,0,2"/>
                 <RadioButton Content="Match charge per slot" GroupName="chargeHandling"

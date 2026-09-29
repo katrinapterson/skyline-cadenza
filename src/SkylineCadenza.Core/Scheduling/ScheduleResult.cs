@@ -45,6 +45,12 @@ public sealed class ScheduleResult
     public bool[] PassengerClashesWithDriver { get; init; } = Array.Empty<bool>();
 
     /// <summary>
+    /// One outcome per <see cref="SchedulingParameters.ForcedPeptides"/> entry,
+    /// in list order. Empty when no forced list was given.
+    /// </summary>
+    public ForcedPeptideOutcome[] ForcedOutcomes { get; init; } = Array.Empty<ForcedPeptideOutcome>();
+
+    /// <summary>
     /// The same schedule with passengers folded in as scheduled precursors, for
     /// the analysis-side target list. The acquisition is identical either way:
     /// passengers are already inside the emitted bands, so no window, width,
@@ -71,6 +77,7 @@ public sealed class ScheduleResult
             PassengerIndices = PassengerIndices,
             PassengerSlotIds = PassengerSlotIds,
             PassengerClashesWithDriver = PassengerClashesWithDriver,
+            ForcedOutcomes = ForcedOutcomes,
         };
     }
 }

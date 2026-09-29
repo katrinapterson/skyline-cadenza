@@ -141,6 +141,34 @@ public sealed record SchedulingParameters
     /// </summary>
     public bool BackgroundFragmentClash { get; init; } = false;
 
+    /// <summary>
+    /// Maximum number of targeted precursors (drivers) one MTM slot may hold.
+    /// A join is refused once the slot is full, so the target falls through
+    /// to another slot, a new solo slot, or its protein's next peptide.
+    /// Untargeted co-isolated precursors and passengers do not count.
+    ///
+    /// 0 (the default) disables the cap, which keeps existing schedules and
+    /// the golden fixtures unchanged.
+    /// </summary>
+    public int MaxTargetsPerSlot { get; init; } = 0;
+
+    /// <summary>
+    /// Peptides placed BEFORE anything else, for carrying the same validation
+    /// or intentionally targeted peptides across schedules; the normal cover
+    /// and load-up passes then fill the rest. Forced precursors obey every
+    /// quality and instrument rule (ion-share floor, fragment checks, window
+    /// geometry, cycle budget) but not the breadth rules: they ignore ranking,
+    /// <see cref="PeptideRankCap"/>, <see cref="MaxPeptidesPerProtein"/>,
+    /// <see cref="MinPeptidesPerProtein"/> and an exclusive target list. Each
+    /// is placed the normal way (join a compatible window, else open one, else
+    /// shrink-and-place). A peptide without an explicit charge tries its
+    /// best-ranked charge state first and falls back to the others. Their
+    /// windows stay open to the fill under the normal rules, but the fill's
+    /// shrink-and-place never drops a forced precursor.
+    /// Empty (the default) leaves scheduling unchanged.
+    /// </summary>
+    public IReadOnlyList<ForcedPeptideSpec> ForcedPeptides { get; init; } = Array.Empty<ForcedPeptideSpec>();
+
     /// <summary>How to order the protein groups going into the assay.</summary>
     public ProteinPriority ProteinRanking { get; init; } = ProteinPriority.SummedIntensity;
 

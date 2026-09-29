@@ -1023,6 +1023,70 @@ public class SchedulerTests
             crowded.ScheduledIndices.Select(i => cands[i].PrecursorId));
     }
 
+    private static SchedulingParameters MaxTargetsParams(int max, params string[] targets) => new()
+    {
+        CycleBudget = 100,
+        MaxTargetsPerSlot = max,
+        TargetProteins = new HashSet<string>(targets),
+        TargetMode = TargetListMode.Exclusive,
+    };
+
+    // Three co-eluting targets within one window's m/z reach, 0.8 Th apart so
+    // their solo bands stay disjoint, no shared
+    // fragments, plus one untargeted precursor in the band. With no cap they
+    // all multiplex into a single slot.
+    private static Candidate[] TargetCapPool() => new[]
+    {
+        Make("a", 500.00, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+        Make("b", 500.80, 5.0, 5.4, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+        Make("c", 501.60, 5.0, 5.4, "G3", fragments: new[] { 175.0, 275.0, 375.0, 475.0 }),
+        Make("bg", 500.40, 5.0, 5.4, "BG", fragments: new[] { 120.0, 220.0, 320.0, 420.0 }),
+    };
+
+    [Fact]
+    public void Scheduler_MaxTargetsPerSlotZero_LeavesSchedulingUnchanged()
+    {
+        var result = Scheduler.Run(TargetCapPool(), MaxTargetsParams(0, "G1", "G2", "G3"));
+
+        Assert.Single(result.Slots);
+        Assert.Equal(3, result.Slots[0].MemberIndices.Count);
+    }
+
+    [Fact]
+    public void Scheduler_MaxTargetsPerSlot_CapsDriversPerSlot()
+    {
+        // A cap of 2 splits the three targets across windows but still
+        // schedules all of them.
+        var cands = TargetCapPool();
+
+        var result = Scheduler.Run(cands, MaxTargetsParams(2, "G1", "G2", "G3"));
+
+        Assert.Equal(new HashSet<string> { "a", "b", "c" },
+            result.ScheduledIndices.Select(i => cands[i].PrecursorId).ToHashSet());
+        Assert.All(result.Slots, s => Assert.True(s.MemberIndices.Count <= 2));
+        Assert.True(result.Slots.Count() >= 2);
+    }
+
+    [Fact]
+    public void Scheduler_MaxTargetsPerSlot_IgnoresUntargetedPrecursors()
+    {
+        // "bg" sits inside the band but is not a target, so a cap of 3 still
+        // admits all three targets into one slot.
+        var result = Scheduler.Run(TargetCapPool(), MaxTargetsParams(3, "G1", "G2", "G3"));
+
+        Assert.Single(result.Slots);
+        Assert.Equal(3, result.Slots[0].MemberIndices.Count);
+    }
+
+    [Fact]
+    public void Scheduler_MaxTargetsPerSlotOne_ProducesOnlySoloSlots()
+    {
+        var result = Scheduler.Run(TargetCapPool(), MaxTargetsParams(1, "G1", "G2", "G3"));
+
+        Assert.Equal(3, result.ScheduledIndices.Length);
+        Assert.All(result.Slots, s => Assert.Single(s.MemberIndices));
+    }
+
     [Fact]
     public void Scheduler_MinTargetIonShare_RejectsStarvedSoloWindow()
     {
