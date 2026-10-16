@@ -11,6 +11,29 @@
     </Window.DataContext>
     <Window.Resources>
         <vm:EnumEqualsConverter x:Key="EnumEq"/>
+        <BooleanToVisibilityConverter x:Key="BoolVis"/>
+        <Style TargetType="Expander">
+            <Setter Property="Margin" Value="0,12,0,0"/>
+            <Setter Property="HeaderTemplate">
+                <Setter.Value>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" FontWeight="Bold"/>
+                    </DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- Indented, left-ruled block holding one data source's inputs -->
+        <Style x:Key="SourceBlock" TargetType="Border">
+            <Setter Property="Margin" Value="2,8,0,0"/>
+            <Setter Property="Padding" Value="8,0,0,0"/>
+            <Setter Property="BorderBrush" Value="#9cc3e6"/>
+            <Setter Property="BorderThickness" Value="2,0,0,0"/>
+        </Style>
+        <Style x:Key="BlockCaption" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Opacity" Value="0.7"/>
+            <Setter Property="Margin" Value="0,0,0,2"/>
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -27,54 +50,101 @@
                 <Image Source="pack://application:,,,/assets/logo.jpg" Stretch="Uniform"
                        MaxHeight="120" HorizontalAlignment="Center" Margin="0,0,0,12"/>
 
-                <!-- Inputs -->
-                <TextBlock Text="Inputs" FontWeight="Bold" Margin="0,0,0,4"/>
-                <TextBlock Text="DIA-NN report.parquet"/>
-                <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseReportCommand}" Margin="4,0,0,0"/>
-                    <TextBox Text="{Binding ReportPath, UpdateSourceTrigger=PropertyChanged}"/>
-                </DockPanel>
-                <TextBlock Text="Carafe library TSV (optional)" Margin="0,8,0,0"/>
-                <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
-                    <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
-                </DockPanel>
-                <CheckBox Content="Backfill unused schedule time with Carafe predictions"
-                          IsChecked="{Binding BackfillWithPredictions}" Margin="0,6,0,0"
-                          ToolTip="Needs both a DIA-NN report and a Carafe library. Schedules the confirmed DIA-NN targets first, then fills leftover schedule capacity with Carafe-predicted targets (deduped against confirmed ones on peptide + charge), scoped to the proteins DIA-NN saw plus any target-protein list. Off: the Carafe library only overrides DIA-NN fragments and adds no precursors. Takes effect on the next Load."/>
-                <TextBlock Text="Bromo peptide ranking (optional)" Margin="0,8,0,0"
-                           ToolTip="Carafe-only mode. A single Bromo peptide_rankings.tsv. Sets within-protein peptide priority; auto-selects the Predicted ranking option at load."/>
-                <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowsePredictedRankingCommand}" Margin="4,0,0,0"/>
-                    <TextBox Text="{Binding PredictedRankingPath, UpdateSourceTrigger=PropertyChanged}"/>
-                </DockPanel>
-                <TextBlock Text="Carafe detectability predictions (optional)" Margin="0,8,0,0"
-                           ToolTip="One or more Carafe *_detectability_pred.tsv files (multi-select), or a folder - one path per line. Used for the detectability cutoff below. If no Bromo peptide ranking is supplied, predicted detectabilities will determine the within-protein peptide priority."/>
-                <DockPanel LastChildFill="True">
-                    <Button DockPanel.Dock="Right" Content="..." Width="32" VerticalAlignment="Top" Command="{Binding BrowseDetectabilityCommand}" Margin="4,0,0,0"/>
-                    <TextBox Text="{Binding DetectabilityPath, UpdateSourceTrigger=PropertyChanged}"
-                             AcceptsReturn="True" TextWrapping="NoWrap"
-                             VerticalScrollBarVisibility="Auto" MaxHeight="64"
-                             ToolTip="One file or folder per line. Multi-select in the file dialog to add several detectability shards."/>
-                </DockPanel>
-                <TextBlock Text="{Binding DetectabilityCutoff, StringFormat='Detectability cutoff: {0:0.00}'}" Margin="0,8,0,0"
-                           ToolTip="Drops candidates whose Carafe detectability is below this. Needs a detectability predictions file above; precursors with no prediction are kept."/>
-                <Slider Minimum="0" Maximum="1" TickFrequency="0.05" IsSnapToTickEnabled="True" Value="{Binding DetectabilityCutoff}"/>
-                <TextBlock Text="{Binding PeakHalfWidthSec, StringFormat='Predicted peak half-width (Carafe): {0:0} s'}" Margin="0,8,0,0"
-                           ToolTip="Half-width of the synthesised peak on the Carafe path (apex +/- this), since the predicted library carries only an apex. The RT buffer below is added on top. Ignored for the DIA-NN workflow."/>
-                <Slider Minimum="2" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeakHalfWidthSec}"/>
-                <Button Content="Load + schedule" Command="{Binding LoadCommand}" Margin="0,8,0,4"/>
-                <DockPanel LastChildFill="True" Margin="0,0,0,4">
+                <!-- 1. Data source: always visible; each mode shows only its own inputs -->
+                <TextBlock Text="Data source" FontWeight="Bold" Margin="0,0,0,4"/>
+                <RadioButton Content="Empirical (DIA-NN report)" GroupName="dataSource"
+                             IsChecked="{Binding DataSource, Converter={StaticResource EnumEq}, ConverterParameter={x:Static vm:DataSource.Empirical}}"
+                             ToolTip="Schedules the precursors DIA-NN identified, using their measured RT windows and fragments."/>
+                <RadioButton Content="Empirical + predicted backfill" GroupName="dataSource" Margin="0,2,0,0"
+                             IsChecked="{Binding DataSource, Converter={StaticResource EnumEq}, ConverterParameter={x:Static vm:DataSource.EmpiricalWithBackfill}}"
+                             ToolTip="Schedules the confirmed DIA-NN targets first, then fills leftover schedule capacity with Carafe-predicted targets (deduped against confirmed ones on peptide + charge), scoped to the proteins DIA-NN saw plus any target protein list. The confirmed schedule is identical to an empirical-only run."/>
+                <RadioButton Content="Predicted only (Carafe library)" GroupName="dataSource" Margin="0,2,0,0"
+                             IsChecked="{Binding DataSource, Converter={StaticResource EnumEq}, ConverterParameter={x:Static vm:DataSource.Predicted}}"
+                             ToolTip="No DIA-NN evidence. Schedules Carafe-predicted precursors for the proteins in the target protein list."/>
+                <RadioButton Content="Skyline document" GroupName="dataSource" Margin="0,2,0,0"
+                             IsChecked="{Binding DataSource, Converter={StaticResource EnumEq}, ConverterParameter={x:Static vm:DataSource.SkylineDocument}}"
+                             ToolTip="Reads precursors and RT windows from the running Skyline document. Needs Cadenza to be launched from Skyline's Tools menu."/>
+
+                <!-- Empirical inputs -->
+                <Border Style="{StaticResource SourceBlock}" Visibility="{Binding ShowEmpiricalInputs, Converter={StaticResource BoolVis}}">
+                    <StackPanel>
+                        <TextBlock Text="Empirical evidence" Style="{StaticResource BlockCaption}"/>
+                        <TextBlock Text="DIA-NN report.parquet"/>
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseReportCommand}" Margin="4,0,0,0"/>
+                            <TextBox Text="{Binding ReportPath, UpdateSourceTrigger=PropertyChanged}"/>
+                        </DockPanel>
+                        <StackPanel Visibility="{Binding ShowFragmentOverlay, Converter={StaticResource BoolVis}}">
+                            <TextBlock Text="Carafe library, fragment fallback (optional)" Margin="0,8,0,0"
+                                       ToolTip="Supplies predicted fragments only for DIA-NN precursors whose report carries none (reports without Fr.N columns). Precursors with measured fragments keep them. Adds no precursors; choose the backfill source for that."/>
+                            <DockPanel LastChildFill="True">
+                                <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
+                                <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            </DockPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Predicted inputs -->
+                <Border Style="{StaticResource SourceBlock}" Visibility="{Binding ShowPredictedInputs, Converter={StaticResource BoolVis}}">
+                    <StackPanel>
+                        <TextBlock Text="Predicted library" Style="{StaticResource BlockCaption}"/>
+                        <TextBlock Text="Carafe library TSV"/>
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowseCarafeCommand}" Margin="4,0,0,0"/>
+                            <TextBox Text="{Binding CarafeTsvPath, UpdateSourceTrigger=PropertyChanged}"/>
+                        </DockPanel>
+                        <TextBlock Text="Bromo peptide ranking (optional)" Margin="0,8,0,0"
+                                   ToolTip="A single Bromo peptide_rankings.tsv. Sets within-protein priority for predicted peptides. In predicted-only mode it auto-selects the Predicted ranking option at load."/>
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Content="..." Width="32" Command="{Binding BrowsePredictedRankingCommand}" Margin="4,0,0,0"/>
+                            <TextBox Text="{Binding PredictedRankingPath, UpdateSourceTrigger=PropertyChanged}"/>
+                        </DockPanel>
+                        <TextBlock Text="Carafe detectability predictions (optional)" Margin="0,8,0,0"
+                                   ToolTip="One or more Carafe *_detectability_pred.tsv files (multi-select), or a folder - one path per line. Used for the detectability cutoff below. If no Bromo peptide ranking is supplied, predicted detectabilities will determine the within-protein peptide priority."/>
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right" Content="..." Width="32" VerticalAlignment="Top" Command="{Binding BrowseDetectabilityCommand}" Margin="4,0,0,0"/>
+                            <TextBox Text="{Binding DetectabilityPath, UpdateSourceTrigger=PropertyChanged}"
+                                     AcceptsReturn="True" TextWrapping="NoWrap"
+                                     VerticalScrollBarVisibility="Auto" MaxHeight="64"
+                                     ToolTip="One file or folder per line. Multi-select in the file dialog to add several detectability shards."/>
+                        </DockPanel>
+                        <TextBlock Text="{Binding DetectabilityCutoff, StringFormat='Detectability cutoff: {0:0.00}'}" Margin="0,8,0,0"
+                                   ToolTip="Drops predicted candidates whose Carafe detectability is below this. Needs a detectability predictions file above; precursors with no prediction are kept."/>
+                        <Slider Minimum="0" Maximum="1" TickFrequency="0.05" IsSnapToTickEnabled="True" Value="{Binding DetectabilityCutoff}"/>
+                        <TextBlock Text="{Binding PeakHalfWidthSec, StringFormat='Predicted peak half-width: {0:0} s'}" Margin="0,8,0,0"
+                                   ToolTip="Half-width of the synthesised peak for predicted precursors (apex +/- this), since the predicted library carries only an apex. The RT buffer is added on top. Confirmed DIA-NN precursors use their measured peak edges."/>
+                        <Slider Minimum="2" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeakHalfWidthSec}"/>
+                        <TextBlock Text="Needs a target protein list (see Targets below)." FontSize="11" Opacity="0.7" Margin="0,4,0,0"
+                                   Visibility="{Binding ShowTargetListHint, Converter={StaticResource BoolVis}}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Skyline document inputs -->
+                <Border Style="{StaticResource SourceBlock}" Visibility="{Binding ShowSkylineInputs, Converter={StaticResource BoolVis}}">
+                    <StackPanel>
+                        <TextBlock Text="Skyline document" Style="{StaticResource BlockCaption}"/>
+                        <TextBlock Text="RT column override (optional)"/>
+                        <TextBox Text="{Binding SkylineRtColumnOverride, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Leave blank to auto-probe. Otherwise paste the invariant column name from Skyline's Document Grid (e.g. PredictedRetentionTime, LibraryRetentionTime, AverageMeasuredRetentionTime)."/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Q value applies to DIA-NN rows and Skyline BLIB replicates, not predictions -->
+                <StackPanel Visibility="{Binding ShowQValueCutoff, Converter={StaticResource BoolVis}}" Margin="0,8,0,0">
+                    <TextBlock Text="{Binding QValueCutoff, StringFormat='Q value cutoff: {0:0.0000}'}"
+                               ToolTip="Drops DIA-NN precursors (or Skyline library replicates) above this q value. Applied at load."/>
+                    <Slider Minimum="0.001" Maximum="0.05" TickFrequency="0.001" Value="{Binding QValueCutoff}"/>
+                </StackPanel>
+
+                <DockPanel LastChildFill="True" Margin="0,8,0,4">
                     <Button DockPanel.Dock="Right" Content="Cancel" Width="64"
                             Command="{Binding CancelSkylineLoadCommand}"
                             IsEnabled="{Binding SkylineLoadCancellable}"
+                            Visibility="{Binding ShowSkylineInputs, Converter={StaticResource BoolVis}}"
                             Margin="4,0,0,0"/>
-                    <Button Content="Load from Skyline document" Command="{Binding LoadFromSkylineCommand}"
-                            IsEnabled="{Binding SkylineConnected}"/>
+                    <Button Content="Load + schedule" Command="{Binding LoadCommand}"/>
                 </DockPanel>
-                <TextBlock Text="RT column override (optional)" FontSize="11" Opacity="0.7" Margin="0,2,0,0"/>
-                <TextBox Text="{Binding SkylineRtColumnOverride, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Leave blank to auto-probe. Otherwise paste the invariant column name from Skyline's Document Grid (e.g. PredictedRetentionTime, LibraryRetentionTime, AverageMeasuredRetentionTime)."/>
                 <ProgressBar IsIndeterminate="True" Height="6" Margin="0,0,0,4">
                     <ProgressBar.Style>
                         <Style TargetType="ProgressBar">
@@ -87,119 +157,126 @@
                         </Style>
                     </ProgressBar.Style>
                 </ProgressBar>
-                <TextBlock Text="{Binding SkylineStatus}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" Margin="0,0,0,16"/>
+                <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" FontStyle="Italic"/>
+                <TextBlock Text="{Binding SkylineStatus}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" Margin="0,4,0,0"/>
 
-                <!-- Target protein list -->
-                <TextBlock Text="Target protein list" FontWeight="Bold" Margin="0,0,0,4"/>
-                <TextBlock Text="Paste a FASTA, accessions (one per line), or gene symbols. Or:" TextWrapping="Wrap" FontSize="11" Opacity="0.7"/>
-                <Button Content="Open FASTA / list..." Command="{Binding BrowseTargetListCommand}" HorizontalAlignment="Left" Margin="0,2,0,4"/>
-                <TextBox Text="{Binding TargetProteinsText, UpdateSourceTrigger=PropertyChanged}"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         Height="80" FontFamily="Consolas" FontSize="11"/>
-                <TextBlock Text="{Binding TargetProteinsParsedCount, StringFormat='Parsed: {0} accessions resolved'}" FontSize="11" Opacity="0.7" Margin="0,2,0,4"/>
-                <RadioButton Content="Target list first, fill with rest" GroupName="targetMode"
-                             IsChecked="{Binding TargetMode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:TargetListMode.FirstThenFill}}"/>
-                <RadioButton Content="Exclusive (target list only)" GroupName="targetMode"
-                             IsChecked="{Binding TargetMode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:TargetListMode.Exclusive}}"/>
+                <!-- 2. Targets -->
+                <Expander Header="Targets" IsExpanded="{Binding TargetsExpanded}">
+                    <StackPanel Margin="0,4,0,0">
+                        <TextBlock Text="Target protein list" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                        <TextBlock Text="Paste a FASTA, accessions (one per line), or gene symbols. Or:" TextWrapping="Wrap" FontSize="11" Opacity="0.7"/>
+                        <Button Content="Open FASTA / list..." Command="{Binding BrowseTargetListCommand}" HorizontalAlignment="Left" Margin="0,2,0,4"/>
+                        <TextBox Text="{Binding TargetProteinsText, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                 Height="80" FontFamily="Consolas" FontSize="11"/>
+                        <TextBlock Text="{Binding TargetProteinsParsedCount, StringFormat='Parsed: {0} accessions resolved'}" FontSize="11" Opacity="0.7" Margin="0,2,0,4"/>
+                        <RadioButton Content="Target list first, fill with rest" GroupName="targetMode"
+                                     IsChecked="{Binding TargetMode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:TargetListMode.FirstThenFill}}"/>
+                        <RadioButton Content="Exclusive (target list only)" GroupName="targetMode" Margin="0,2,0,0"
+                                     IsChecked="{Binding TargetMode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:TargetListMode.Exclusive}}"/>
 
-                <!-- Forced peptides -->
-                <TextBlock Text="Forced peptides" FontWeight="Bold" Margin="0,12,0,4"/>
-                <TextBlock Text="Scheduled before everything else, one per line (PEPTIDEK, PEPTIDEK+2, or a charge column). Or:" TextWrapping="Wrap" FontSize="11" Opacity="0.7"/>
-                <Button Content="Open peptide list..." Command="{Binding BrowseForcedPeptidesCommand}" HorizontalAlignment="Left" Margin="0,2,0,4"/>
-                <TextBox Text="{Binding ForcedPeptidesText, UpdateSourceTrigger=PropertyChanged}"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         Height="60" FontFamily="Consolas" FontSize="11"
-                         ToolTip="Each forced peptide is placed before the normal fill, ignoring ranking, the rank cap, the per-protein max/min and an exclusive target list. It still has to pass every quality rule (ion-share floor, fragment interference, window geometry, cycle budget) and is placed the normal way: join a compatible window, else open one, else shrink-and-place. A peptide without a charge tries its best charge state first, then the others. The rest of the schedule then fills in around them under the same rules; it may share their windows but can never drop a forced peptide."/>
-                <TextBlock Text="{Binding ForcedPeptidesSummary}" TextWrapping="Wrap" FontSize="11" Opacity="0.7" Margin="0,2,0,4"/>
+                        <TextBlock Text="Forced peptides" FontWeight="SemiBold" Margin="0,12,0,2"/>
+                        <TextBlock Text="Scheduled before everything else, one per line (PEPTIDEK, PEPTIDEK+2, or a charge column). Or:" TextWrapping="Wrap" FontSize="11" Opacity="0.7"/>
+                        <Button Content="Open peptide list..." Command="{Binding BrowseForcedPeptidesCommand}" HorizontalAlignment="Left" Margin="0,2,0,4"/>
+                        <TextBox Text="{Binding ForcedPeptidesText, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                 Height="60" FontFamily="Consolas" FontSize="11"
+                                 ToolTip="Each forced peptide is placed before the normal fill, ignoring ranking, the rank cap, the per-protein max/min and an exclusive target list. It still has to pass every quality rule (ion-share floor, fragment interference, window geometry, cycle budget) and is placed the normal way: join a compatible window, else open one, else shrink-and-place. A peptide without a charge tries its best charge state first, then the others. The rest of the schedule then fills in around them under the same rules; it may share their windows but can never drop a forced peptide."/>
+                        <TextBlock Text="{Binding ForcedPeptidesSummary}" TextWrapping="Wrap" FontSize="11" Opacity="0.7" Margin="0,2,0,0"/>
+                    </StackPanel>
+                </Expander>
 
-                <!-- Acquisition mode -->
-                <TextBlock Text="Acquisition mode" FontWeight="Bold" Margin="0,16,0,4"/>
-                <RadioButton Content="MTM (multiplex)" GroupName="mode"
-                             IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Mtm}}"/>
-                <RadioButton Content="PRM (1 precursor / slot)" GroupName="mode"
-                             IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Prm}}"/>
-                <!-- Coverage objective -->
-                <TextBlock Text="Coverage objective" FontWeight="Bold" Margin="0,16,0,4"/>
-                <RadioButton Content="Balanced" GroupName="objective" Margin="0,2,0,0"
-                             IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.Balanced}}"
-                             ToolTip="Published Stellar-webinar algorithm. Reactive cover pass: walk each protein's score-sorted queue and take the first peptide that fits; on an RT-budget hit, fall back to the next peptide (slide 9). Round-robin load-up to Max peptides per protein."/>
-                <RadioButton Content="Maximize Protein Coverage" GroupName="objective" Margin="0,2,0,0"
-                             IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizeProteins}}"
-                             ToolTip="Default. Look-ahead cover prefers peptides that join an existing slot for free over peptides that would open a new slot. Load-up capped at Min peptides per protein so saved budget feeds first-peptide coverage of more proteins. Falls back to opening a slot when no joinable peptide exists."/>
-                <RadioButton Content="Maximize Peptide Coverage" GroupName="objective" Margin="0,2,0,0"
-                             IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizePeptides}}"
-                             ToolTip="Look-ahead cover (no joinable-first preference). Load-up uncapped: round-robin continues past Max until the cycle budget saturates or every group has exhausted its candidate queue. Fairness is preserved (a protein never gets its k+1th peptide before every other protein has had a chance at its kth)."/>
+                <!-- 3. Acquisition -->
+                <Expander Header="Acquisition" IsExpanded="True">
+                    <StackPanel Margin="0,4,0,0">
+                        <RadioButton Content="MTM (multiplex)" GroupName="mode"
+                                     IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Mtm}}"/>
+                        <RadioButton Content="PRM (1 precursor / slot)" GroupName="mode" Margin="0,2,0,0"
+                                     IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Prm}}"/>
 
-                <!-- MTM constraints -->
-                <TextBlock Text="MTM constraints" FontWeight="Bold" Margin="0,16,0,4"/>
-                <TextBlock Text="{Binding IsolationWindowTh, StringFormat='Isolation window cap: {0:0.0} Th'}"/>
-                <Slider Minimum="1.0" Maximum="4.0" TickFrequency="0.5" Value="{Binding IsolationWindowTh}"/>
-                <TextBlock Text="{Binding FragmentTolDa, StringFormat='Fragment tolerance: {0:0.00} Da'}" Margin="0,4,0,0"/>
-                <Slider Minimum="0.05" Maximum="1.0" TickFrequency="0.05" Value="{Binding FragmentTolDa}"/>
-                <TextBlock Text="{Binding PrmIsolationWidthTh, StringFormat='PRM / solo-slot window width: {0:0.0} Th'}" Margin="0,4,0,0"/>
-                <Slider Minimum="0.4" Maximum="2.0" TickFrequency="0.1" Value="{Binding PrmIsolationWidthTh}"/>
+                        <TextBlock Text="{Binding PrmIsolationWidthTh, StringFormat='PRM / solo-slot window width: {0:0.0} Th'}" Margin="0,8,0,0"/>
+                        <Slider Minimum="0.4" Maximum="2.0" TickFrequency="0.1" Value="{Binding PrmIsolationWidthTh}"/>
 
-                <TextBlock Text="{Binding MinTargetIonShare, StringFormat='Minimum target share of window current: {0:P1} (0 = off)'}" Margin="0,4,0,0"
-                           ToolTip="Refuses to place a target into a window where competing ions would take so much of the fill that it cannot be quantified. Every target in the slot is checked over its own elution, and each competitor counts only the part of its peak that actually co-elutes with that target - so a huge neighbour clipping the edge of a peak is not treated the same as one sitting on top of it. The denominator is every identified precursor in the emitted band, not just the scheduled targets: on a real HeLa MTM acquisition ~66% of the current inside the target windows came from precursors that were never targets. Raising this trades protein coverage for usable signal on the targets that remain. Counts identified precursors only, so it is a lower bound on the true competition."/>
-                <Slider Minimum="0" Maximum="0.30" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding MinTargetIonShare}"/>
+                        <!-- MTM-only window packing rules -->
+                        <StackPanel Visibility="{Binding IsMtm, Converter={StaticResource BoolVis}}">
+                            <TextBlock Text="{Binding IsolationWindowTh, StringFormat='Isolation window cap: {0:0.0} Th'}" Margin="0,4,0,0"/>
+                            <Slider Minimum="1.0" Maximum="4.0" TickFrequency="0.5" Value="{Binding IsolationWindowTh}"/>
+                            <TextBlock Text="{Binding FragmentTolDa, StringFormat='Fragment tolerance: {0:0.00} Da'}" Margin="0,4,0,0"/>
+                            <Slider Minimum="0.05" Maximum="1.0" TickFrequency="0.05" Value="{Binding FragmentTolDa}"/>
+                            <TextBlock Text="{Binding MaxTargetsPerSlot, StringFormat='Max targets per slot: {0} (0 = no cap)'}" Margin="0,4,0,0"
+                                       ToolTip="Caps how many targeted precursors one MTM window may multiplex. Once a window is full, a target that would have joined it goes to another window, opens its own, or falls through to its protein's next peptide. Untargeted co-isolated precursors and passengers do not count against the cap."/>
+                            <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MaxTargetsPerSlot}"/>
+                            <TextBlock Text="Charge handling per slot" Margin="0,8,0,2"/>
+                            <RadioButton Content="Match charge per slot" GroupName="chargeHandling"
+                                         IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.SameChargePerSlot}}"/>
+                            <RadioButton Content="Allow mixed (use slot majority charge)" GroupName="chargeHandling" Margin="0,2,0,0"
+                                         IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.AllowMixed}}"/>
+                        </StackPanel>
 
-                <TextBlock Text="{Binding MaxTargetsPerSlot, StringFormat='Max targets per slot: {0} (0 = no cap)'}" Margin="0,4,0,0"
-                           ToolTip="Caps how many targeted precursors one MTM window may multiplex. Once a window is full, a target that would have joined it goes to another window, opens its own, or falls through to its protein's next peptide. Untargeted co-isolated precursors and passengers do not count against the cap."/>
-                <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MaxTargetsPerSlot}"/>
+                        <TextBlock Text="{Binding MinTargetIonShare, StringFormat='Minimum target share of window current: {0:P1} (0 = off)'}" Margin="0,8,0,0"
+                                   ToolTip="Refuses to place a target into a window where competing ions would take so much of the fill that it cannot be quantified. Every target in the slot is checked over its own elution, and each competitor counts only the part of its peak that actually co-elutes with that target - so a huge neighbour clipping the edge of a peak is not treated the same as one sitting on top of it. The denominator is every identified precursor in the emitted band, not just the scheduled targets: on a real HeLa MTM acquisition ~66% of the current inside the target windows came from precursors that were never targets. Raising this trades protein coverage for usable signal on the targets that remain. Counts identified precursors only, so it is a lower bound on the true competition."/>
+                        <Slider Minimum="0" Maximum="0.30" TickFrequency="0.01" IsSnapToTickEnabled="True" Value="{Binding MinTargetIonShare}"/>
 
-                <TextBlock Text="Charge handling per slot" Margin="0,8,0,2"/>
-                <RadioButton Content="Match charge per slot" GroupName="chargeHandling"
-                             IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.SameChargePerSlot}}"/>
-                <RadioButton Content="Allow mixed (use slot majority charge)" GroupName="chargeHandling"
-                             IsChecked="{Binding ChargeHandling, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:ChargeHandling.AllowMixed}}"/>
+                        <TextBlock Text="{Binding NormalizedCollisionEnergy, StringFormat='Normalized CE: {0:0.0}'}" Margin="0,4,0,0"
+                                   ToolTip="Written to the exported Thermo method. Does not affect the schedule."/>
+                        <Slider Minimum="15" Maximum="40" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding NormalizedCollisionEnergy}"/>
+                    </StackPanel>
+                </Expander>
 
-                <!-- Cycle budget -->
-                <TextBlock Text="Cycle budget" FontWeight="Bold" Margin="0,16,0,4"/>
-                <TextBlock Text="{Binding CycleBudget, StringFormat='Concurrent slots: {0}'}"/>
-                <Slider Minimum="20" Maximum="200" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding CycleBudget}"/>
-                <TextBlock Text="{Binding FiringPadSec, StringFormat='RT buffer (each side): {0:0} s'}" Margin="0,4,0,0"/>
-                <Slider Minimum="0" Maximum="60" TickFrequency="5" IsSnapToTickEnabled="True" Value="{Binding FiringPadSec}"/>
+                <!-- 4. Selection strategy -->
+                <Expander Header="Selection strategy" IsExpanded="True">
+                    <StackPanel Margin="0,4,0,0">
+                        <TextBlock Text="Coverage objective" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                        <RadioButton Content="Balanced" GroupName="objective" Margin="0,2,0,0"
+                                     IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.Balanced}}"
+                                     ToolTip="Published Stellar-webinar algorithm. Reactive cover pass: walk each protein's score-sorted queue and take the first peptide that fits; on an RT-budget hit, fall back to the next peptide (slide 9). Round-robin load-up to Max peptides per protein."/>
+                        <RadioButton Content="Maximize Protein Coverage" GroupName="objective" Margin="0,2,0,0"
+                                     IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizeProteins}}"
+                                     ToolTip="Default. Look-ahead cover prefers peptides that join an existing slot for free over peptides that would open a new slot, falling back to the least-loaded RT bin when no joinable peptide exists. Round-robin load-up to Max peptides per protein."/>
+                        <RadioButton Content="Maximize Peptide Coverage" GroupName="objective" Margin="0,2,0,0"
+                                     IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizePeptides}}"
+                                     ToolTip="Look-ahead cover (no joinable-first preference). Load-up uncapped: round-robin continues past Max until the cycle budget saturates or every group has exhausted its candidate queue. Fairness is preserved (a protein never gets its k+1th peptide before every other protein has had a chance at its kth)."/>
 
-                <!-- Per-protein bounds -->
-                <TextBlock Text="Per-protein peptide bounds" FontWeight="Bold" Margin="0,16,0,4"/>
-                <TextBlock Text="{Binding MinPeptidesPerProtein, StringFormat='Minimum peptides per protein: {0}'}"/>
-                <Slider Minimum="1" Maximum="6" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MinPeptidesPerProtein}"/>
-                <TextBlock Text="{Binding MaxPeptidesPerProtein, StringFormat='Maximum peptides per protein: {0}'}" Margin="0,4,0,0"/>
-                <Slider Minimum="1" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MaxPeptidesPerProtein}"/>
+                        <TextBlock Text="Protein ranking" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                        <ComboBox SelectedItem="{Binding ProteinRanking}">
+                            <sched:ProteinPriority>SummedIntensity</sched:ProteinPriority>
+                            <sched:ProteinPriority>ProteinQValue</sched:ProteinPriority>
+                            <sched:ProteinPriority>ProvidedListOrder</sched:ProteinPriority>
+                        </ComboBox>
+                        <TextBlock Text="Peptide ranking" FontWeight="SemiBold" Margin="0,8,0,2"/>
+                        <ComboBox ItemsSource="{Binding PeptideRankingOptions}" SelectedItem="{Binding PeptideRanking}"
+                                  ToolTip="Within-protein priority. In backfill mode this ranks the confirmed tier; the predicted tier always ranks by its Bromo / detectability score. PredictedRanking is offered in predicted-only mode."/>
+                        <TextBlock Text="{Binding PeptideRankCap, StringFormat='Rank cap: top {0} per protein (0 = no cap)'}" Margin="0,8,0,0"
+                                   ToolTip="Only the top N precursors of each protein - ranked by the peptide ranking above - are eligible for scheduling at all. Counts precursors, so a peptide at two charge states uses two of the N. In backfill mode the cap is applied separately to the confirmed tier (by its evidence metric) and the predicted tier (by its predicted score). Distinct from the maximum below, which caps how many eligible peptides actually get scheduled."/>
+                        <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeptideRankCap}"/>
+                        <TextBlock Text="{Binding MinPeptidesPerProtein, StringFormat='Minimum peptides per protein: {0}'}" Margin="0,4,0,0"/>
+                        <Slider Minimum="1" Maximum="6" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MinPeptidesPerProtein}"/>
+                        <TextBlock Text="{Binding MaxPeptidesPerProtein, StringFormat='Maximum peptides per protein: {0}'}" Margin="0,4,0,0"/>
+                        <Slider Minimum="1" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding MaxPeptidesPerProtein}"/>
+                    </StackPanel>
+                </Expander>
 
-                <!-- Priority knobs -->
-                <TextBlock Text="Protein ranking" FontWeight="Bold" Margin="0,16,0,4"/>
-                <ComboBox SelectedItem="{Binding ProteinRanking}">
-                    <sched:ProteinPriority>SummedIntensity</sched:ProteinPriority>
-                    <sched:ProteinPriority>ProteinQValue</sched:ProteinPriority>
-                    <sched:ProteinPriority>ProvidedListOrder</sched:ProteinPriority>
-                </ComboBox>
-                <TextBlock Text="Peptide ranking" FontWeight="Bold" Margin="0,12,0,4"/>
-                <ComboBox SelectedItem="{Binding PeptideRanking}">
-                    <sched:PeptidePriority>PrecursorQuantity</sched:PeptidePriority>
-                    <sched:PeptidePriority>QValue</sched:PeptidePriority>
-                    <sched:PeptidePriority>PredictedRanking</sched:PeptidePriority>
-                </ComboBox>
-                <TextBlock Text="{Binding PeptideRankCap, StringFormat='Rank cap: top {0} per protein (0 = no cap)'}" Margin="0,8,0,0"
-                           ToolTip="Only the top N precursors of each protein - ranked by the peptide ranking above - are eligible for scheduling at all. Counts precursors, so a peptide at two charge states uses two of the N. In backfill mode the cap is applied separately to the confirmed tier (by its evidence metric) and the predicted tier (by its predicted score). Distinct from the maximum above, which caps how many eligible peptides actually get scheduled."/>
-                <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding PeptideRankCap}"/>
+                <!-- 5. Cycle budget -->
+                <Expander Header="Cycle budget" IsExpanded="True">
+                    <StackPanel Margin="0,4,0,0">
+                        <TextBlock Text="{Binding CycleBudget, StringFormat='Concurrent slots: {0}'}"/>
+                        <Slider Minimum="20" Maximum="200" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding CycleBudget}"/>
+                        <TextBlock Text="{Binding FiringPadSec, StringFormat='RT buffer (each side): {0:0} s'}" Margin="0,4,0,0"/>
+                        <Slider Minimum="0" Maximum="60" TickFrequency="5" IsSnapToTickEnabled="True" Value="{Binding FiringPadSec}"/>
+                    </StackPanel>
+                </Expander>
 
-                <!-- Library filter -->
-                <TextBlock Text="Library filter" FontWeight="Bold" Margin="0,16,0,4"/>
-                <TextBlock Text="{Binding QValueCutoff, StringFormat='Q value cutoff: {0:0.0000}'}"/>
-                <Slider Minimum="0.001" Maximum="0.05" TickFrequency="0.001" Value="{Binding QValueCutoff}"/>
-
-                <TextBlock Text="Output" FontWeight="Bold" Margin="0,16,0,4"/>
-                <TextBlock Text="{Binding NormalizedCollisionEnergy, StringFormat='Normalized CE: {0:0.0}'}"/>
-                <Slider Minimum="15" Maximum="40" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding NormalizedCollisionEnergy}"/>
-                <Button Content="Export Thermo CSV..." Command="{Binding ExportThermoCsvCommand}" Margin="0,4,0,4"/>
-                <CheckBox IsChecked="{Binding IncludePassengers}" Margin="0,6,0,4"
-                          Content="Include passengers in Skyline push"
-                          ToolTip="Passengers are precursors that already fall inside a scheduled window's isolation band and elute entirely within its firing time, so the instrument fragments them either way. Including them changes only what the Skyline document extracts, never the acquisition: the exported Thermo method is identical. They are tagged 'passenger' in the transition list so they stay distinguishable from intended targets. On a real HeLa assay this added ~9,200 precursors and ~450 protein groups for no extra cycle time."/>
-                <Button Content="Push targets to Skyline" Command="{Binding UpdateSkylineCommand}"
-                        IsEnabled="{Binding SkylineConnected}"/>
-
-                <TextBlock Text="{Binding StatusMessage}" Margin="0,16,0,0" TextWrapping="Wrap" FontStyle="Italic"/>
+                <!-- 6. Output -->
+                <Expander Header="Output" IsExpanded="True">
+                    <StackPanel Margin="0,4,0,0">
+                        <Button Content="Export Thermo CSV..." Command="{Binding ExportThermoCsvCommand}" Margin="0,0,0,4"/>
+                        <CheckBox IsChecked="{Binding IncludePassengers}" Margin="0,4,0,4"
+                                  Content="Include passengers in Skyline push"
+                                  ToolTip="Passengers are precursors that already fall inside a scheduled window's isolation band and elute entirely within its firing time, so the instrument fragments them either way. Including them changes only what the Skyline document extracts, never the acquisition: the exported Thermo method is identical. They are tagged 'passenger' in the transition list so they stay distinguishable from intended targets. On a real HeLa assay this added ~9,200 precursors and ~450 protein groups for no extra cycle time."/>
+                        <Button Content="Push targets to Skyline" Command="{Binding UpdateSkylineCommand}"
+                                IsEnabled="{Binding SkylineConnected}"/>
+                    </StackPanel>
+                </Expander>
             </StackPanel>
         </ScrollViewer>
 

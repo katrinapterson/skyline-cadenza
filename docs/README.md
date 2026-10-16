@@ -35,6 +35,11 @@ integration details that don't belong in a development-context file.
   for clashing (the "illusory exclusion"). Motivates the window-scoped
   interference redesign. Guarded by a skipped regression test.
 
+- [`automation.md`](automation.md): driving Cadenza from another app
+  (AutoTargeting). Covers the headless `SkylineCadenzaCli export-thermo`
+  verb, its PARAMS.json fields and app defaults, and the GUI's standalone
+  `--report` / `--export-dir` launch options.
+
 ## Screenshots
 
 `screenshots/` carries the figures referenced from the release notes and

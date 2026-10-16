@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SkylineCadenza.Core\SkylineCadenza.Core.csproj" />
+    <!-- export-thermo verb and its parameter parsing (internals visible). -->
+    <ProjectReference Include="..\SkylineCadenza.Cli\SkylineCadenza.Cli.csproj" />
   </ItemGroup>
 
   <ItemGroup>

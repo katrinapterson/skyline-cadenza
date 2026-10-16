@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <AppProject>$(MSBuildThisFileDirectory)..\src\SkylineCadenza.App\SkylineCadenza.App.csproj</AppProject>
+    <CliProject>$(MSBuildThisFileDirectory)..\src\SkylineCadenza.Cli\SkylineCadenza.Cli.csproj</CliProject>
     <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishDir>$(MSBuildThisFileDirectory)staging\</PublishDir>
@@ -15,6 +16,9 @@
     output plus the tool-inf manifest into SkylineCadenza.zip. Mirrors the
     PackageToolZip target in pwiz's SkylineAiConnector.csproj.
 
+    The headless CLI (SkylineCadenzaCli.exe) is published into the same
+    folder: other apps (AutoTargeting) look for it beside SkylineCadenza.exe.
+
     Usage:
       dotnet msbuild build/package.proj
       dotnet msbuild build/package.proj /p:Configuration=Debug
@@ -24,6 +28,7 @@
     <RemoveDir Directories="$(PublishDir)" />
     <MakeDir Directories="$(PublishDir);$(ZipDir)" />
     <Exec Command="dotnet publish &quot;$(AppProject)&quot; -c $(Configuration) -r $(RuntimeIdentifier) --self-contained false /p:UseAppHost=true /p:PublishDir=&quot;$(PublishDir)&quot;" />
+    <Exec Command="dotnet publish &quot;$(CliProject)&quot; -c $(Configuration) -r $(RuntimeIdentifier) --self-contained false /p:UseAppHost=true /p:PublishDir=&quot;$(PublishDir)&quot;" />
     <Delete Files="$(ZipPath)" Condition="Exists('$(ZipPath)')" />
     <ZipDirectory SourceDirectory="$(PublishDir)" DestinationFile="$(ZipPath)" />
     <Message Importance="high" Text="Packaged $(ZipPath)" />

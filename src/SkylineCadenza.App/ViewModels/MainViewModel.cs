@@ -60,18 +60,58 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private double _detectabilityCutoff = 0.5;
 
     /// <summary>
-    /// When a DIA-NN report and a Carafe library are both loaded, schedule the
-    /// confirmed DIA-NN targets first, then backfill leftover schedule capacity
-    /// with Carafe-predicted targets (deduped against the confirmed ones on
-    /// peptide + charge). Off = the Carafe library only overrides DIA-NN
-    /// fragments and adds no precursors. Takes effect on the next Load.
+    /// Which inputs the next Load reads. Drives both <see cref="LoadAsync"/>
+    /// dispatch and which input blocks the panel shows. Takes effect on the
+    /// next Load; switching does not discard the current schedule.
     /// </summary>
-    [ObservableProperty] private bool _backfillWithPredictions;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowEmpiricalInputs), nameof(ShowPredictedInputs),
+        nameof(ShowFragmentOverlay), nameof(ShowSkylineInputs), nameof(ShowQValueCutoff),
+        nameof(ShowTargetListHint))]
+    private DataSource _dataSource = DataSource.Empirical;
+
+    public bool ShowEmpiricalInputs =>
+        DataSource is DataSource.Empirical or DataSource.EmpiricalWithBackfill;
+    public bool ShowPredictedInputs =>
+        DataSource is DataSource.EmpiricalWithBackfill or DataSource.Predicted;
+    /// <summary>Empirical mode only: Carafe library used as a fragment fallback for rows with none.</summary>
+    public bool ShowFragmentOverlay => DataSource == DataSource.Empirical;
+    public bool ShowSkylineInputs => DataSource == DataSource.SkylineDocument;
+    /// <summary>The Q value cutoff filters DIA-NN rows and Skyline BLIB replicates; predictions have none.</summary>
+    public bool ShowQValueCutoff => DataSource != DataSource.Predicted;
+    public bool ShowTargetListHint => DataSource == DataSource.Predicted;
+
+    /// <summary>
+    /// Peptide-ranking choices valid for the current source. PredictedRanking is
+    /// offered only in predicted-only mode: in backfill mode the predicted tier
+    /// always ranks by its own score and the confirmed tier needs an evidence
+    /// metric, so the option would be a no-op there.
+    /// </summary>
+    public IReadOnlyList<PeptidePriority> PeptideRankingOptions =>
+        DataSource == DataSource.Predicted
+            ? new[] { PeptidePriority.PrecursorQuantity, PeptidePriority.QValue, PeptidePriority.PredictedRanking }
+            : new[] { PeptidePriority.PrecursorQuantity, PeptidePriority.QValue };
+
+    /// <summary>Bound to the Targets expander; opened when predicted-only mode needs the list.</summary>
+    [ObservableProperty] private bool _targetsExpanded;
+
+    partial void OnDataSourceChanged(DataSource value)
+    {
+        // Reset before the options list changes so the ComboBox never holds an
+        // item that is no longer in its ItemsSource.
+        if (value != DataSource.Predicted && PeptideRanking == PeptidePriority.PredictedRanking)
+            PeptideRanking = PeptidePriority.PrecursorQuantity;
+        OnPropertyChanged(nameof(PeptideRankingOptions));
+        if (value == DataSource.Predicted) TargetsExpanded = true;
+    }
 
     // Acquisition + load balancing
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SlotsLabel))]
+    [NotifyPropertyChangedFor(nameof(SlotsLabel), nameof(IsMtm))]
     private AcquisitionMode _mode = AcquisitionMode.Mtm;
+
+    /// <summary>Shows the MTM-only controls (window cap, fragment clash, charge handling, target cap).</summary>
+    public bool IsMtm => Mode == AcquisitionMode.Mtm;
 
     /// <summary>Header text for the slots metric: "MTM slots" or "PRM slots".</summary>
     public string SlotsLabel => Mode == AcquisitionMode.Prm ? "PRM slots" : "MTM slots";
@@ -251,8 +291,33 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _skylineStatus = "Skyline: not connected.";
     [ObservableProperty] private string? _skylineDocumentPath;
 
+    /// <summary>
+    /// Default folder for "Export Thermo CSV..." (<c>--export-dir</c>), or
+    /// null for the dialog's own default.
+    /// </summary>
+    public string? ExportDir { get; }
+
+    /// <summary>
+    /// True when launched with <c>--</c> options rather than by Skyline: no
+    /// Skyline connection is attempted and Push to Skyline stays disabled.
+    /// </summary>
+    public bool IsStandalone { get; }
+
+    private const string StandaloneSkylineMessage =
+        "Skyline: not connected - Cadenza was started standalone (--report), so Push to Skyline is disabled. "
+        + "Use Export Thermo CSV..., or launch Cadenza from Skyline's Tools menu to push targets.";
+
     public MainViewModel()
     {
+        var launch = App.Launch;
+        ExportDir = launch.ExportDir;
+        IsStandalone = launch.Standalone;
+        if (IsStandalone)
+        {
+            StartStandalone(launch);
+            return;
+        }
+
         // Try to attach to a running Skyline instance on launch. Done on a
         // background thread because NamedPipeClientStream.Connect() blocks
         // for up to 5 s during discovery; running it inline would freeze
@@ -260,11 +325,42 @@ public partial class MainViewModel : ObservableObject
         _ = Task.Run(TryConnectSkyline);
     }
 
+    /// <summary>
+    /// Standalone launch (<c>--report</c> / <c>--export-dir</c>): skip Skyline,
+    /// preload the report as an Empirical source, and run Load + schedule once
+    /// the window is up.
+    /// </summary>
+    private void StartStandalone(LaunchOptions launch)
+    {
+        SkylineConnected = false;
+        SkylineStatus = StandaloneSkylineMessage;
+        if (launch.Errors.Count > 0)
+        {
+            StatusMessage = $"Launch options: {string.Join(" ", launch.Errors)} Usage: {LaunchOptions.Usage}";
+            return;
+        }
+        if (launch.ReportPath is null) return;
+
+        DataSource = DataSource.Empirical;
+        ReportPath = launch.ReportPath;
+        if (!File.Exists(launch.ReportPath))
+        {
+            StatusMessage = $"--report: DIA-NN report not found: {launch.ReportPath}";
+            return;
+        }
+        StatusMessage = $"Loading {Path.GetFileName(launch.ReportPath)} (--report)...";
+        // Queue behind window construction so MainWindow has subscribed to
+        // LibraryLoaded / ScheduleUpdated before the first load fires them.
+        System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Loaded,
+            new Action(() => _ = LoadCommand.ExecuteAsync(null)));
+    }
+
     private void TryConnectSkyline()
     {
         try
         {
-            _skylineSession = SkylineSession.FromArguments(App.LaunchArgs);
+            _skylineSession = SkylineSession.FromArguments(App.Launch.SkylineArgs);
             // Don't open the pipe yet - Skyline closes it after each
             // request, so we connect lazily inside each Execute() call.
             // Kick off a 2 s polling loop to track document changes.
@@ -408,6 +504,19 @@ public partial class MainViewModel : ObservableObject
             FileName = "cadenza_targets.csv",
             Title = "Export Thermo scheduled inclusion CSV",
         };
+        if (!string.IsNullOrWhiteSpace(ExportDir))
+        {
+            // --export-dir: another app is watching this folder for the CSV.
+            try
+            {
+                Directory.CreateDirectory(ExportDir);
+                dlg.InitialDirectory = Path.GetFullPath(ExportDir);
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = $"--export-dir {ExportDir} is not usable ({ex.Message}); pick a folder.";
+            }
+        }
         if (dlg.ShowDialog() != true) return;
         try
         {
@@ -431,7 +540,7 @@ public partial class MainViewModel : ObservableObject
         }
         if (_skylineSession is null)
         {
-            StatusMessage = "Skyline: not connected. Launch this tool from Skyline's Tools menu.";
+            StatusMessage = IsStandalone ? StandaloneSkylineMessage : "Skyline: not connected. Launch this tool from Skyline's Tools menu.";
             return;
         }
 
@@ -710,7 +819,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (_skylineSession is null)
         {
-            StatusMessage = "Skyline: not connected. Launch this tool from Skyline's Tools menu.";
+            StatusMessage = IsStandalone ? StandaloneSkylineMessage : "Skyline: not connected. Launch this tool from Skyline's Tools menu.";
             return;
         }
         IsBusy = true;
@@ -957,21 +1066,37 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task LoadAsync()
     {
+        if (DataSource == DataSource.SkylineDocument)
+        {
+            // Manages IsBusy and cancellation itself.
+            await LoadFromSkylineAsync();
+            return;
+        }
+
         bool hasReport = !string.IsNullOrEmpty(ReportPath) && File.Exists(ReportPath);
         bool hasCarafe = !string.IsNullOrEmpty(CarafeTsvPath) && File.Exists(CarafeTsvPath);
         bool hasTargets = !string.IsNullOrWhiteSpace(TargetProteinsText);
 
-        if (!hasReport && !(hasCarafe && hasTargets))
-            {
-            StatusMessage = "Need either a DIA-NN report.parquet, OR a Carafe library + a target protein list.";
-                return;
-            }
+        string? missing = DataSource switch
+        {
+            DataSource.Empirical when !hasReport => "Select a DIA-NN report.parquet.",
+            DataSource.EmpiricalWithBackfill when !hasReport || !hasCarafe =>
+                "Backfill needs both a DIA-NN report.parquet and a Carafe library.",
+            DataSource.Predicted when !hasCarafe || !hasTargets =>
+                "Predicted-only mode needs a Carafe library and a target protein list.",
+            _ => null,
+        };
+        if (missing is not null)
+        {
+            StatusMessage = missing;
+            return;
+        }
 
         IsBusy = true;
         try
         {
-            if (hasReport) await LoadFromDiannAsync();
-            else await LoadFromCarafeOnlyAsync();
+            if (DataSource == DataSource.Predicted) await LoadFromCarafeOnlyAsync();
+            else await LoadFromDiannAsync();
         }
         finally
         {
@@ -999,7 +1124,7 @@ public partial class MainViewModel : ObservableObject
                 CarafeTsvPath!, allowed, Candidate.FragmentLimit));
         }
 
-        if (BackfillWithPredictions && hasCarafe)
+        if (DataSource == DataSource.EmpiricalWithBackfill && hasCarafe)
         {
             await LoadCombinedBackfillAsync(rows, frags);
             return;
@@ -1435,6 +1560,19 @@ public partial class MainViewModel : ObservableObject
 
 /// <summary>One row in the protein-coverage plot's data series.</summary>
 public sealed record ProteinCoverageRow(string ProteinGroup, double SummedIntensity, int PeptidesScheduled);
+
+/// <summary>Which inputs a Load reads.</summary>
+public enum DataSource
+{
+    /// <summary>DIA-NN report; an optional Carafe library only fills in missing fragments.</summary>
+    Empirical,
+    /// <summary>DIA-NN targets first, then Carafe predictions fill leftover cycle time.</summary>
+    EmpiricalWithBackfill,
+    /// <summary>Carafe library scoped to a target protein list; no DIA-NN evidence.</summary>
+    Predicted,
+    /// <summary>Precursors and RT windows from the running Skyline document.</summary>
+    SkylineDocument,
+}
 
 /// <summary>Which precursor set drives the m/z x RT heatmap.</summary>
 public enum HeatmapView

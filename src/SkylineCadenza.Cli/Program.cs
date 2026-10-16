@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SkylineCadenza.Core.Ingest;
+using SkylineCadenza.Core.Output;
 using SkylineCadenza.Core.Parsimony;
 using SkylineCadenza.Core.Scheduling;
 
@@ -12,7 +13,9 @@ namespace SkylineCadenza.Cli;
 /// <see cref="Scheduler.Run"/>, and writes the schedule back out as
 /// JSON. Used by the algorithm-comparison Jupyter notebook so that the
 /// realistic plots reflect Cadenza's real C# scheduler bit-for-bit
-/// rather than a Python re-implementation.
+/// rather than a Python re-implementation. <c>export-thermo</c> writes the
+/// app's Thermo scheduled inclusion CSV from a DIA-NN report, so another app
+/// (AutoTargeting) can design an assay without opening the GUI.
 /// </summary>
 public static class Program
 {
@@ -28,6 +31,7 @@ public static class Program
     ///   SkylineCadenzaCli schedule INPUT.json OUTPUT.json
     ///   SkylineCadenzaCli schedule - -        (stdin / stdout)
     ///   SkylineCadenzaCli schedule-diann REPORT.parquet PARAMS.json OUTPUT.json
+    ///   SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv
     /// </summary>
     public static async Task<int> Main(string[] args)
     {
@@ -43,6 +47,7 @@ public static class Program
             {
                 "schedule" => await RunScheduleAsync(args.Skip(1).ToArray()),
                 "schedule-diann" => await RunScheduleDiannAsync(args.Skip(1).ToArray()),
+                "export-thermo" => await RunExportThermoAsync(args.Skip(1).ToArray()),
                 "--help" or "-h" or "help" => Help(),
                 _ => UnknownVerb(args[0]),
             };
@@ -69,7 +74,7 @@ public static class Program
               ?? throw new InvalidDataException($"Empty file: {rest[0]}");
 
         var candidates = request.Candidates.Select(JsonToCandidate).ToList();
-        var parameters = ToSchedulingParameters(request.Parameters);
+        var parameters = ToSchedulingParameters(request.Parameters, new SchedulingParameters());
         var result = Scheduler.Run(candidates, parameters);
         var response = ToResponse(result);
 
@@ -102,7 +107,7 @@ public static class Program
         }
 
         var paramDto = JsonSerializer.Deserialize<SchedulingParametersDto>(File.ReadAllText(rest[1]), JsonOpts);
-        var parameters = ToSchedulingParameters(paramDto);
+        var parameters = ToSchedulingParameters(paramDto, new SchedulingParameters());
         var rows = await DiannParquetReader.LoadAsync(rest[0], parameters.QValueCutoff);
         var parsimony = ParsimonyEngine.Assign(DiannParquetReader.BuildPeptideProteinMap(rows));
         var candidates = CandidateBuilder.Build(rows, parsimony, new Dictionary<FragmentKey, FragmentIon[]>());
@@ -149,6 +154,69 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Ingest a DIA-NN report.parquet and write the Thermo Method Editor
+    /// scheduled inclusion list the app's "Export Thermo CSV..." writes, via
+    /// <see cref="DiannThermoExport.RunAsync"/> (the app's Empirical Load +
+    /// export path). Unset parameters take the APP's defaults
+    /// (<see cref="DiannThermoExport.AppDefaults"/>), not the bare Core ones,
+    /// so a headless run matches the GUI with untouched settings. PARAMS may
+    /// be '-' for all defaults.
+    /// </summary>
+    internal static async Task<int> RunExportThermoAsync(string[] rest)
+    {
+        if (rest.Length != 3)
+        {
+            Console.Error.WriteLine("usage: SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv");
+            return 64;
+        }
+        string reportPath = rest[0], paramsPath = rest[1], outputPath = rest[2];
+        if (!File.Exists(reportPath))
+        {
+            Console.Error.WriteLine($"error: DIA-NN report not found: {reportPath}");
+            return 66; // EX_NOINPUT
+        }
+        if (paramsPath != "-" && !File.Exists(paramsPath))
+        {
+            Console.Error.WriteLine($"error: parameters file not found: {paramsPath}");
+            return 66;
+        }
+
+        var (parameters, targetText) = ReadExportParameters(paramsPath == "-" ? null : File.ReadAllText(paramsPath));
+        var export = await DiannThermoExport.RunAsync(reportPath, parameters, targetText);
+        if (export.Schedule.ScheduledIndices.Length == 0)
+        {
+            Console.Error.WriteLine(
+                $"error: nothing scheduled from {export.Candidates.Count:n0} precursors; no CSV written. Check the parameters.");
+            return 2;
+        }
+
+        string? dir = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        await File.WriteAllTextAsync(outputPath, export.Csv);
+
+        var r = export.Schedule;
+        Console.Error.WriteLine(
+            $"pool {export.Candidates.Count:n0}  scheduled {r.ScheduledIndices.Length:n0}  proteins {r.ProteinGroupsCovered:n0}  "
+            + $"slots {r.Slots.Length:n0}  rows {export.RowCount:n0}  mode {export.Parameters.Mode}  -> {outputPath}");
+        return 0;
+    }
+
+    /// <summary>
+    /// Parse export-thermo's PARAMS JSON (null or blank = all defaults) over
+    /// the app's defaults. Returns the parameters plus the raw target-protein
+    /// text, which is resolved against the report during the export.
+    /// </summary>
+    internal static (SchedulingParameters Parameters, string? TargetProteinsText) ReadExportParameters(string? json)
+    {
+        var dto = string.IsNullOrWhiteSpace(json)
+            ? null
+            : JsonSerializer.Deserialize<SchedulingParametersDto>(json, JsonOpts);
+        var p = ToSchedulingParameters(dto, DiannThermoExport.AppDefaults);
+        string? targets = dto?.TargetProteins is { Length: > 0 } t ? string.Join('\n', t) : null;
+        return (p, targets);
+    }
+
     private static Candidate JsonToCandidate(CandidateDto dto)
     {
         var ions = (dto.Fragments ?? Array.Empty<FragmentIonDto>())
@@ -177,35 +245,43 @@ public static class Program
         };
     }
 
-    private static SchedulingParameters ToSchedulingParameters(SchedulingParametersDto? dto)
+    /// <summary>
+    /// Overlay the DTO's set fields on <paramref name="defaults"/>; a null DTO
+    /// gives the defaults. schedule / schedule-diann pass a bare
+    /// <see cref="SchedulingParameters"/> (Core defaults); export-thermo passes
+    /// <see cref="DiannThermoExport.AppDefaults"/>.
+    /// </summary>
+    internal static SchedulingParameters ToSchedulingParameters(SchedulingParametersDto? dto, SchedulingParameters defaults)
     {
-        // Empty / null DTO -> stock defaults.
-        if (dto is null) return new SchedulingParameters();
+        if (dto is null) return defaults;
 
-        var p = new SchedulingParameters
+        var d = defaults;
+        return d with
         {
-            Mode = dto.Mode ?? AcquisitionMode.Mtm,
-            Objective = dto.Objective ?? CoverageObjective.MaximizeProteins,
-            IsolationWindowTh = dto.IsolationWindowTh ?? 3.0,
-            PrmIsolationWidthTh = dto.PrmIsolationWidthTh ?? 0.7,
-            FragmentTolDa = dto.FragmentTolDa ?? 0.5,
-            CycleBudget = dto.CycleBudget ?? 100,
-            FiringPadSec = dto.FiringPadSec ?? 15.0,
-            RtBinMin = dto.RtBinMin ?? 0.05,
-            QValueCutoff = dto.QValueCutoff ?? 0.01,
-            MinPeptidesPerProtein = dto.MinPeptidesPerProtein ?? 1,
-            MaxPeptidesPerProtein = dto.MaxPeptidesPerProtein ?? 5,
-            PeptideRankCap = dto.PeptideRankCap ?? 0,
-            MinTargetIonShare = dto.MinTargetIonShare ?? 0.0,
-            MaxTargetsPerSlot = dto.MaxTargetsPerSlot ?? 0,
-            BackgroundFragmentClash = dto.BackgroundFragmentClash ?? false,
-            ForcedPeptides = ForcedPeptides.Parse(string.Join('\n', dto.ForcedPeptides ?? Array.Empty<string>()), out _),
-            ProteinRanking = dto.ProteinRanking ?? ProteinPriority.SummedIntensity,
-            PeptideRanking = dto.PeptideRanking ?? PeptidePriority.PrecursorQuantity,
-            ChargeHandling = dto.ChargeHandling ?? ChargeHandling.SameChargePerSlot,
-            NormalizedCollisionEnergy = dto.NormalizedCollisionEnergy ?? 28.0,
+            Mode = dto.Mode ?? d.Mode,
+            Objective = dto.Objective ?? d.Objective,
+            IsolationWindowTh = dto.IsolationWindowTh ?? d.IsolationWindowTh,
+            PrmIsolationWidthTh = dto.PrmIsolationWidthTh ?? d.PrmIsolationWidthTh,
+            FragmentTolDa = dto.FragmentTolDa ?? d.FragmentTolDa,
+            CycleBudget = dto.CycleBudget ?? d.CycleBudget,
+            FiringPadSec = dto.FiringPadSec ?? d.FiringPadSec,
+            RtBinMin = dto.RtBinMin ?? d.RtBinMin,
+            QValueCutoff = dto.QValueCutoff ?? d.QValueCutoff,
+            MinPeptidesPerProtein = dto.MinPeptidesPerProtein ?? d.MinPeptidesPerProtein,
+            MaxPeptidesPerProtein = dto.MaxPeptidesPerProtein ?? d.MaxPeptidesPerProtein,
+            PeptideRankCap = dto.PeptideRankCap ?? d.PeptideRankCap,
+            MinTargetIonShare = dto.MinTargetIonShare ?? d.MinTargetIonShare,
+            MaxTargetsPerSlot = dto.MaxTargetsPerSlot ?? d.MaxTargetsPerSlot,
+            BackgroundFragmentClash = dto.BackgroundFragmentClash ?? d.BackgroundFragmentClash,
+            ForcedPeptides = dto.ForcedPeptides is null
+                ? d.ForcedPeptides
+                : ForcedPeptides.Parse(string.Join('\n', dto.ForcedPeptides), out _),
+            TargetMode = dto.TargetMode ?? d.TargetMode,
+            ProteinRanking = dto.ProteinRanking ?? d.ProteinRanking,
+            PeptideRanking = dto.PeptideRanking ?? d.PeptideRanking,
+            ChargeHandling = dto.ChargeHandling ?? d.ChargeHandling,
+            NormalizedCollisionEnergy = dto.NormalizedCollisionEnergy ?? d.NormalizedCollisionEnergy,
         };
-        return p;
     }
 
     private static ScheduleResponse ToResponse(ScheduleResult result)
@@ -252,6 +328,9 @@ public static class Program
         Console.Error.WriteLine("                                     Pass '-' for stdin/stdout.");
         Console.Error.WriteLine("  schedule-diann REPORT.parquet PARAMS.json OUTPUT.json");
         Console.Error.WriteLine("                                     Ingest a DIA-NN report as the app does, then schedule.");
+        Console.Error.WriteLine("  export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv");
+        Console.Error.WriteLine("                                     Write the app's Thermo scheduled inclusion CSV.");
+        Console.Error.WriteLine("                                     PARAMS '-' = the app's default settings.");
         Console.Error.WriteLine("  help                              Show this help.");
     }
 }
@@ -313,6 +392,12 @@ internal sealed class SchedulingParametersDto
     public bool? BackgroundFragmentClash { get; set; }
     /// <summary>Forced peptide entries, one per element, same syntax as the app's box.</summary>
     public string[]? ForcedPeptides { get; set; }
+    /// <summary>
+    /// export-thermo only: target proteins (accessions or gene names), one per
+    /// element, same syntax as the app's box. Resolved against the report.
+    /// </summary>
+    public string[]? TargetProteins { get; set; }
+    public TargetListMode? TargetMode { get; set; }
     public ProteinPriority? ProteinRanking { get; set; }
     public PeptidePriority? PeptideRanking { get; set; }
     public ChargeHandling? ChargeHandling { get; set; }
