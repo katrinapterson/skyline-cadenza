@@ -164,6 +164,63 @@ public class ExportThermoCliTests : IDisposable
         _output.WriteLine($"scheduled {schedule.ScheduledIndices.Length:n0} in {schedule.Slots.Length:n0} slots");
     }
 
+    [Fact]
+    public async Task Summary_reports_targets_and_forced_peptides_without_changing_the_csv()
+    {
+        string report = Path.Combine(_dir, "report.parquet");
+        await WriteSyntheticReportAsync(report);
+        string paramsPath = Path.Combine(_dir, "params.json");
+        File.WriteAllText(paramsPath, """
+            { "targetProteins": ["GENE2", "NOPE9"], "targetMode": "Exclusive", "forcedPeptides": ["ZZZZZK"] }
+            """);
+        string plain = Path.Combine(_dir, "plain.csv"), withSummary = Path.Combine(_dir, "with.csv");
+        string summaryPath = Path.Combine(_dir, "summary.json");
+
+        Assert.Equal(0, await Program.RunExportThermoAsync(new[] { report, paramsPath, plain }));
+        Assert.Equal(0, await Program.RunExportThermoAsync(new[] { report, paramsPath, withSummary, summaryPath }));
+        Assert.Equal(File.ReadAllText(plain), File.ReadAllText(withSummary));
+
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(summaryPath));
+        var root = doc.RootElement;
+        Assert.Equal(16, root.GetProperty("poolPrecursors").GetInt32());
+        Assert.Equal(4, root.GetProperty("poolProteinGroups").GetInt32());
+        var targets = root.GetProperty("targets").EnumerateArray().ToList();
+        Assert.Equal("GENE2", targets[0].GetProperty("entry").GetString());
+        Assert.Equal("P00002", targets[0].GetProperty("proteinGroups")[0].GetString());
+        Assert.True(targets[0].GetProperty("scheduledPrecursors").GetInt32() > 0);
+        Assert.Equal(0, targets[1].GetProperty("proteinGroups").GetArrayLength());
+        // Exclusive: only the target protein is scheduled, and it is flagged as one.
+        var proteins = root.GetProperty("proteins").EnumerateArray().ToList();
+        Assert.All(proteins, p => Assert.Equal("P00002", p.GetProperty("group").GetString()));
+        Assert.True(proteins[0].GetProperty("isTarget").GetBoolean());
+        Assert.Equal("GENE2", proteins[0].GetProperty("genes")[0].GetString());
+        Assert.Equal("NotInPool", root.GetProperty("forced")[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Describe_lists_the_scheduler_pool_with_genes()
+    {
+        string report = Path.Combine(_dir, "report.parquet");
+        await WriteSyntheticReportAsync(report);
+        string outPath = Path.Combine(_dir, "describe.json");
+
+        Assert.Equal(0, await Program.RunDescribeDiannAsync(new[] { report, "-", outPath }));
+
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(outPath));
+        var root = doc.RootElement;
+        // The decoy and the q = 0.5 row are not in the pool.
+        Assert.Equal(4, root.GetProperty("proteinGroups").GetInt32());
+        Assert.Equal(16, root.GetProperty("precursors").GetInt32());
+        var proteins = root.GetProperty("proteins").EnumerateArray().ToList();
+        Assert.Contains(proteins, p => p.GetProperty("group").GetString() == "P00003"
+            && p.GetProperty("genes")[0].GetString() == "GENE3"
+            && p.GetProperty("precursors").GetArrayLength() == 4);
+        // Largest summed quantity first.
+        var sums = proteins.Select(p => p.GetProperty("summedQuantity").GetDouble()).ToList();
+        Assert.Equal(sums.OrderByDescending(x => x), sums);
+        Assert.Equal(64, await Program.RunDescribeDiannAsync(new[] { report }));
+    }
+
     /// <summary>
     /// The app's path: Empirical Load (no Carafe library, no target list)
     /// then "Export Thermo CSV..." on the resulting schedule.

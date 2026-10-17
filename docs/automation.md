@@ -17,14 +17,17 @@ byte-identical, because they run the same Core code.
 ## Headless: `export-thermo`
 
 ```
-SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json OUTPUT.csv
-SkylineCadenzaCli export-thermo REPORT.parquet - OUTPUT.csv
+SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json OUTPUT.csv [SUMMARY.json]
+SkylineCadenzaCli export-thermo REPORT.parquet - OUTPUT.csv [SUMMARY.json]
 ```
 
 - `REPORT.parquet`: a DIA-NN `report.parquet`.
 - `PARAMS.json`: scheduling settings, or `-` to use the app's defaults for
   every setting. Any field left out of the JSON also takes the app's default.
 - `OUTPUT.csv`: the Thermo CSV. Missing parent folders are created.
+- `SUMMARY.json` (optional): what was scheduled, for a caller that cannot see
+  the plots (`AssayDesignSummary` in Core). Written even when nothing could be
+  scheduled, so the caller can see why. Asking for it does not change the CSV.
 
 The pipeline is the app's **Empirical (DIA-NN report)** Load followed by
 **Export Thermo CSV...**. It reads the report at the q-value cutoff, runs
@@ -96,6 +99,72 @@ Field names are camelCase and enums are strings. Example:
 }
 ```
 
+### The summary
+
+```json
+{
+  "poolPrecursors": 35055, "poolProteinGroups": 5200,
+  "scheduledPrecursors": 3, "scheduledPeptides": 3, "passengers": 0,
+  "proteinGroupsCovered": 1, "windows": 3, "csvRows": 3, "mode": "Mtm",
+  "cycleBudget": 100, "peakConcurrentWindows": 1,
+  "targets": [
+    { "entry": "H4C1", "proteinGroups": ["P62805"], "scheduledPrecursors": 3 },
+    { "entry": "NOTAPROTEIN", "proteinGroups": [], "scheduledPrecursors": 0 }
+  ],
+  "forced": [
+    { "entry": "TVTAMDVVYALK", "status": "Scheduled", "precursor": "TVTAMDVVYALK+2", "usedFallbackCharge": false }
+  ],
+  "proteins": [
+    { "group": "P62805", "genes": ["H4C1"], "isTarget": true,
+      "precursors": ["VFLENVIR+2", "TVTAMDVVYALK+2", "ISGLIYEETR+2"] }
+  ]
+}
+```
+
+- `targets`: one per target-list entry, in order, with the report's protein
+  groups it matched. An empty `proteinGroups` means the entry is not in the
+  report at the q-value cutoff.
+- `forced`: one per forced peptide. `Scheduled`, `NotInPool` (no
+  identification, so no retention time) or `Rejected` (failed the quality or
+  instrument rules).
+- `proteins`: every scheduled protein group, targets first, with its
+  scheduled precursors (driver precursors, as `scheduledPrecursors` counts).
+- `peakConcurrentWindows`: the most slots open at one retention time;
+  compare with `cycleBudget` to see how full the cycle is.
+
+## Headless: `describe-diann`
+
+```
+SkylineCadenzaCli describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json
+```
+
+Lists what `export-thermo` would schedule from: the protein groups and
+precursors after the same ingest (q-value cutoff from PARAMS, parsimony),
+ranked by summed precursor quantity, with gene names. A caller choosing
+`targetProteins` and `forcedPeptides` should use these names, which are the
+ones the target list is matched against. Gene names come from DIA-NN's
+`Genes` column, paired with `Protein.Ids` by position when the two lists are
+the same length; a row naming one gene applies it to all its proteins.
+
+```json
+{
+  "qValueCutoff": 0.01, "proteinGroups": 5200, "precursors": 35055,
+  "proteins": [
+    { "group": "P62805", "genes": ["H4C1"], "peptides": 11, "uniquePeptides": 11,
+      "summedQuantity": 1.715e9, "proteinQValue": 0.00025,
+      "precursors": [
+        { "modifiedSequence": "VFLENVIR", "strippedSequence": "VFLENVIR", "charge": 2,
+          "mz": 495.29, "rtApex": 14.39, "rtStart": 14.26, "rtStop": 14.55,
+          "quantity": 6.36e8, "qValue": 0.0003, "peptideType": "unique" }
+      ] }
+  ]
+}
+```
+
+`proteinQValue` is null when the report has no `PG.Q.Value` column. On the
+reference Stellar GPF report this takes about 12 s and writes 16 MB. Exit
+codes are as for `export-thermo` (no 2).
+
 ## Interactive: GUI launch options
 
 ```
@@ -126,6 +195,9 @@ recent running Skyline.
 
 `ExportThermoCliTests` writes a small synthetic DIA-NN report, runs
 `export-thermo` in both MTM and PRM, and checks that the CSV equals
-`ThermoCsvWriter` output from the app's Load pipeline. When the reference
+`ThermoCsvWriter` output from the app's Load pipeline, that the summary
+reports target entries (including one that matches nothing) and forced
+peptides without changing the CSV, and that `describe-diann` lists the pool
+with gene names. When the reference
 Stellar report is on disk, the test repeats that check on it.
 `LaunchOptionsTests` covers argument parsing.

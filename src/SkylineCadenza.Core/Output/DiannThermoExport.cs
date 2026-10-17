@@ -40,6 +40,17 @@ public static class DiannThermoExport
     {
         /// <summary>Data rows in <see cref="Csv"/> (excludes the header).</summary>
         public int RowCount => Csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1;
+
+        /// <summary>
+        /// Each target-list entry, in order, with the accessions it resolved
+        /// to (a gene can name several). Empty when no list was given.
+        /// </summary>
+        public IReadOnlyList<(string Entry, IReadOnlyList<string> Accessions)> TargetEntries { get; init; } =
+            Array.Empty<(string, IReadOnlyList<string>)>();
+
+        /// <summary>Gene names per protein group, for summaries.</summary>
+        public IReadOnlyDictionary<string, IReadOnlyList<string>> GroupGenes { get; init; } =
+            new Dictionary<string, IReadOnlyList<string>>();
     }
 
     /// <summary>
@@ -58,26 +69,53 @@ public static class DiannThermoExport
         string? targetProteinsText = null,
         CancellationToken cancellationToken = default)
     {
-        var rows = await DiannParquetReader.LoadAsync(reportPath, parameters.QValueCutoff, cancellationToken);
-        if (rows.Count == 0)
-            throw new InvalidDataException(
-                $"No precursors in {reportPath} passed the q-value cutoff {parameters.QValueCutoff}.");
-
+        var (rows, parsimony, candidates) = await LoadPoolAsync(reportPath, parameters.QValueCutoff, cancellationToken);
         var geneToAccession = ProteinListParser.BuildGeneToAccession(rows);
-        var parsimony = ParsimonyEngine.Assign(DiannParquetReader.BuildPeptideProteinMap(rows));
         var knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
-        var candidates = CandidateBuilder.Build(rows, parsimony, new Dictionary<FragmentKey, FragmentIon[]>());
 
         var p = parameters;
+        var entries = new List<(string, IReadOnlyList<string>)>();
         if (!string.IsNullOrWhiteSpace(targetProteinsText))
         {
             var tokens = ProteinListParser.ParseText(targetProteinsText);
             var resolved = ProteinListParser.ResolveGenes(tokens, geneToAccession, knownAccessions);
             p = p with { TargetProteins = resolved.ToHashSet() };
+            // Per entry, so a caller can say which ones matched nothing.
+            foreach (var token in tokens)
+                entries.Add((token, ProteinListParser.ResolveGenes(new[] { token }, geneToAccession, knownAccessions)));
         }
 
         var schedule = Scheduler.Run(candidates, p, cancellationToken);
         var csv = ThermoCsvWriter.Build(candidates, schedule, p);
-        return new Result(candidates, schedule, p, csv);
+        return new Result(candidates, schedule, p, csv)
+        {
+            TargetEntries = entries,
+            GroupGenes = ReportCatalog.GroupGenes(rows, candidates),
+        };
+    }
+
+    /// <summary>
+    /// The protein groups and precursors the scheduler would choose from in
+    /// <paramref name="reportPath"/>: the same ingest as <see cref="RunAsync"/>,
+    /// without scheduling.
+    /// </summary>
+    public static async Task<List<ReportCatalog.ProteinEntry>> DescribeAsync(
+        string reportPath, double qValueCutoff, CancellationToken cancellationToken = default)
+    {
+        var (rows, _, candidates) = await LoadPoolAsync(reportPath, qValueCutoff, cancellationToken);
+        return ReportCatalog.Build(candidates, ReportCatalog.GroupGenes(rows, candidates));
+    }
+
+    private static async Task<(List<DiannRow> Rows, Dictionary<string, (string Group, string Type)> Parsimony, List<Candidate> Candidates)>
+        LoadPoolAsync(string reportPath, double qValueCutoff, CancellationToken cancellationToken)
+    {
+        var rows = await DiannParquetReader.LoadAsync(reportPath, qValueCutoff, cancellationToken);
+        if (rows.Count == 0)
+            throw new InvalidDataException(
+                $"No precursors in {reportPath} passed the q-value cutoff {qValueCutoff}.");
+
+        var parsimony = ParsimonyEngine.Assign(DiannParquetReader.BuildPeptideProteinMap(rows));
+        var candidates = CandidateBuilder.Build(rows, parsimony, new Dictionary<FragmentKey, FragmentIon[]>());
+        return (rows, parsimony, candidates);
     }
 }

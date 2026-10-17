@@ -31,7 +31,8 @@ public static class Program
     ///   SkylineCadenzaCli schedule INPUT.json OUTPUT.json
     ///   SkylineCadenzaCli schedule - -        (stdin / stdout)
     ///   SkylineCadenzaCli schedule-diann REPORT.parquet PARAMS.json OUTPUT.json
-    ///   SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv
+    ///   SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json]
+    ///   SkylineCadenzaCli describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json
     /// </summary>
     public static async Task<int> Main(string[] args)
     {
@@ -48,6 +49,7 @@ public static class Program
                 "schedule" => await RunScheduleAsync(args.Skip(1).ToArray()),
                 "schedule-diann" => await RunScheduleDiannAsync(args.Skip(1).ToArray()),
                 "export-thermo" => await RunExportThermoAsync(args.Skip(1).ToArray()),
+                "describe-diann" => await RunDescribeDiannAsync(args.Skip(1).ToArray()),
                 "--help" or "-h" or "help" => Help(),
                 _ => UnknownVerb(args[0]),
             };
@@ -161,16 +163,20 @@ public static class Program
     /// export path). Unset parameters take the APP's defaults
     /// (<see cref="DiannThermoExport.AppDefaults"/>), not the bare Core ones,
     /// so a headless run matches the GUI with untouched settings. PARAMS may
-    /// be '-' for all defaults.
+    /// be '-' for all defaults. An optional SUMMARY.json gets an
+    /// <see cref="AssayDesignSummary"/>, so a caller can see what was
+    /// scheduled without parsing the CSV; it is written even when nothing was
+    /// scheduled, to say why.
     /// </summary>
     internal static async Task<int> RunExportThermoAsync(string[] rest)
     {
-        if (rest.Length != 3)
+        if (rest.Length is not (3 or 4))
         {
-            Console.Error.WriteLine("usage: SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv");
+            Console.Error.WriteLine("usage: SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json]");
             return 64;
         }
         string reportPath = rest[0], paramsPath = rest[1], outputPath = rest[2];
+        string? summaryPath = rest.Length == 4 ? rest[3] : null;
         if (!File.Exists(reportPath))
         {
             Console.Error.WriteLine($"error: DIA-NN report not found: {reportPath}");
@@ -184,6 +190,8 @@ public static class Program
 
         var (parameters, targetText) = ReadExportParameters(paramsPath == "-" ? null : File.ReadAllText(paramsPath));
         var export = await DiannThermoExport.RunAsync(reportPath, parameters, targetText);
+        if (summaryPath is not null)
+            await WriteJsonAsync(summaryPath, AssayDesignSummary.Build(export));
         if (export.Schedule.ScheduledIndices.Length == 0)
         {
             Console.Error.WriteLine(
@@ -200,6 +208,51 @@ public static class Program
             $"pool {export.Candidates.Count:n0}  scheduled {r.ScheduledIndices.Length:n0}  proteins {r.ProteinGroupsCovered:n0}  "
             + $"slots {r.Slots.Length:n0}  rows {export.RowCount:n0}  mode {export.Parameters.Mode}  -> {outputPath}");
         return 0;
+    }
+
+    /// <summary>
+    /// Write the protein groups and precursors a DIA-NN report offers the
+    /// scheduler (<see cref="ReportCatalog"/>), after export-thermo's ingest
+    /// at PARAMS' q-value cutoff, so a caller can pick target proteins and
+    /// forced peptides by the names export-thermo will match.
+    /// </summary>
+    internal static async Task<int> RunDescribeDiannAsync(string[] rest)
+    {
+        if (rest.Length != 3)
+        {
+            Console.Error.WriteLine("usage: SkylineCadenzaCli describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json");
+            return 64;
+        }
+        string reportPath = rest[0], paramsPath = rest[1], outputPath = rest[2];
+        if (!File.Exists(reportPath))
+        {
+            Console.Error.WriteLine($"error: DIA-NN report not found: {reportPath}");
+            return 66;
+        }
+        if (paramsPath != "-" && !File.Exists(paramsPath))
+        {
+            Console.Error.WriteLine($"error: parameters file not found: {paramsPath}");
+            return 66;
+        }
+
+        var (parameters, _) = ReadExportParameters(paramsPath == "-" ? null : File.ReadAllText(paramsPath));
+        var proteins = await DiannThermoExport.DescribeAsync(reportPath, parameters.QValueCutoff);
+        await WriteJsonAsync(outputPath, new ReportDescription
+        {
+            QValueCutoff = parameters.QValueCutoff,
+            ProteinGroups = proteins.Count,
+            Precursors = proteins.Sum(p => p.Precursors.Count),
+            Proteins = proteins,
+        });
+        Console.Error.WriteLine($"proteins {proteins.Count:n0}  precursors {proteins.Sum(p => p.Precursors.Count):n0}  -> {outputPath}");
+        return 0;
+    }
+
+    private static async Task WriteJsonAsync<T>(string path, T value)
+    {
+        string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, JsonOpts));
     }
 
     /// <summary>
@@ -331,6 +384,10 @@ public static class Program
         Console.Error.WriteLine("  export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv");
         Console.Error.WriteLine("                                     Write the app's Thermo scheduled inclusion CSV.");
         Console.Error.WriteLine("                                     PARAMS '-' = the app's default settings.");
+        Console.Error.WriteLine("                                     SUMMARY.json (optional) = what was scheduled.");
+        Console.Error.WriteLine("  describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json");
+        Console.Error.WriteLine("                                     List the protein groups and precursors export-thermo");
+        Console.Error.WriteLine("                                     would schedule from, by its names.");
         Console.Error.WriteLine("  help                              Show this help.");
     }
 }
@@ -433,6 +490,14 @@ internal sealed class DiannScheduleResponse
     public int Slots { get; set; }
     public ScheduledTargetDto[] Targets { get; set; } = Array.Empty<ScheduledTargetDto>();
     public ForcedOutcomeDto[] Forced { get; set; } = Array.Empty<ForcedOutcomeDto>();
+}
+
+internal sealed class ReportDescription
+{
+    public double QValueCutoff { get; set; }
+    public int ProteinGroups { get; set; }
+    public int Precursors { get; set; }
+    public IReadOnlyList<ReportCatalog.ProteinEntry> Proteins { get; set; } = Array.Empty<ReportCatalog.ProteinEntry>();
 }
 
 internal sealed class ForcedOutcomeDto
