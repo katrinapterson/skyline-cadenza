@@ -213,21 +213,13 @@ public static class SkylineSettingsConfigurator
     public sealed record ConfigureResult(Recommendation Recommendation, string SkylineOutput);
 
     /// <summary>
-    /// Compute the recommendation and apply it to the live document via
-    /// <c>RunCommand</c>. Per Nick Shulman, <c>RunCommand</c> against
-    /// the JSON-RPC pipe operates on the document held by the running
-    /// Skyline UI, so the same flags <c>SkylineCmd</c> would accept on
-    /// a saved file also work here.
+    /// The SkylineCmd flags that apply <paramref name="rec"/>, in the
+    /// batches <see cref="ConfigureAsync"/> sends them in. Shared with
+    /// <see cref="Output.SkylineDocumentExport"/>, so a document built
+    /// headless gets the same settings as a push to a running Skyline.
     /// </summary>
-    public static async Task<ConfigureResult> ConfigureAsync(
-        SkylineSession session,
-        IReadOnlyList<Candidate> scheduledCandidates,
-        AcquisitionMode mode,
-        double firingPadMin = 0.25,
-        CancellationToken cancellationToken = default)
+    public static string[][] ArgumentBatches(Recommendation rec)
     {
-        var rec = Recommend(scheduledCandidates, mode, firingPadMin);
-
         // One RunCommand per individual flag. Verified against
         // pwiz_tools/Skyline/CommandArgs.cs:
         //
@@ -310,7 +302,26 @@ public static class SkylineSettingsConfigurator
             "--full-scan-precursor-res=" + rec.PrecursorMassAccuracyPpm.ToString(
                 "0.#", System.Globalization.CultureInfo.InvariantCulture),
         });
-        string[][] argBatches = batchList.ToArray();
+        return batchList.ToArray();
+    }
+
+    /// <summary>
+    /// Compute the recommendation and apply it to the live document via
+    /// <c>RunCommand</c>. Per Nick Shulman, <c>RunCommand</c> against
+    /// the JSON-RPC pipe operates on the document held by the running
+    /// Skyline UI, so the same flags <c>SkylineCmd</c> would accept on
+    /// a saved file also work here.
+    /// </summary>
+    public static async Task<ConfigureResult> ConfigureAsync(
+        SkylineSession session,
+        IReadOnlyList<Candidate> scheduledCandidates,
+        AcquisitionMode mode,
+        double firingPadMin = 0.25,
+        CancellationToken cancellationToken = default)
+    {
+        var rec = Recommend(scheduledCandidates, mode, firingPadMin);
+
+        string[][] argBatches = ArgumentBatches(rec);
 
         var collected = new List<string>(argBatches.Length);
         foreach (var args in argBatches)

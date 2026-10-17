@@ -221,6 +221,60 @@ public class ExportThermoCliTests : IDisposable
         Assert.Equal(64, await Program.RunDescribeDiannAsync(new[] { report }));
     }
 
+    [Fact]
+    public void Skyline_and_skylinecmd_options_are_taken_in_either_form()
+    {
+        Assert.True(Program.TryTakeOptions(new[] { "r", "-", "o.csv", "--skyline", "a b.sky", @"--skylinecmd=C:\x\SkylineCmd.exe" },
+            out var positional, out var options, "--skyline", "--skylinecmd"));
+        Assert.Equal(new[] { "r", "-", "o.csv" }, positional);
+        Assert.Equal("a b.sky", options["--skyline"]);
+        Assert.Equal(@"C:\x\SkylineCmd.exe", options["--skylinecmd"]);
+        Assert.False(Program.TryTakeOptions(new[] { "r", "--bogus=1" }, out _, out _, "--skyline"));
+        Assert.False(Program.TryTakeOptions(new[] { "r", "--skyline" }, out _, out _, "--skyline"));
+    }
+
+    [Fact]
+    public void Skyline_document_arguments_match_the_push_and_import_last()
+    {
+        var candidates = new List<Candidate>();
+        var rec = SkylineSettingsConfigurator.Recommend(candidates, AcquisitionMode.Mtm);
+        var args = SkylineDocumentExport.Arguments("C:/a/assay.sky", "C:/a/assay.blib", "assay", "C:/a/t.csv", rec);
+        Assert.Equal("--new=C:/a/assay.sky", args[0]);
+        // Every flag the push sends to a running Skyline, scheduling-window RT filter included.
+        Assert.All(SkylineSettingsConfigurator.ArgumentBatches(rec).SelectMany(b => b), a => Assert.Contains(a, args));
+        Assert.Contains("--full-scan-rt-filter=scheduling_windows", args);
+        // Settings, then the library, then the transitions, then save.
+        Assert.True(args.IndexOf("--full-scan-acquisition-method=DIA") < args.IndexOf("--add-library-path=C:/a/assay.blib"));
+        Assert.True(args.IndexOf("--add-library-name=assay") < args.IndexOf("--import-transition-list=C:/a/t.csv"));
+        Assert.Equal("--save", args[^1]);
+    }
+
+    [Fact]
+    public async Task Skyline_document_holds_the_scheduled_assay()
+    {
+        // The synthetic report's fragments are not the peptides' real ones, so
+        // Skyline rejects its transitions; the real report is needed here.
+        if (SkylineDocumentExport.FindSkylineCmd() is null || !File.Exists(RealReportPath))
+        {
+            _output.WriteLine("SkylineCmd or the reference report missing - skipping.");
+            return;
+        }
+        string paramsPath = Path.Combine(_dir, "params.json");
+        File.WriteAllText(paramsPath, """
+            { "targetProteins": ["H4C1", "ACTB", "EGFR"], "targetMode": "Exclusive", "maxPeptidesPerProtein": 3 }
+            """);
+        string sky = Path.Combine(_dir, "doc", "assay.sky");
+
+        Assert.Equal(0, await Program.RunExportThermoAsync(new[] { RealReportPath, paramsPath, Path.Combine(_dir, "o.csv"), "--skyline", sky }));
+
+        var (parameters, targets) = Program.ReadExportParameters(File.ReadAllText(paramsPath));
+        var export = await DiannThermoExport.RunAsync(RealReportPath, parameters, targets);
+        string xml = File.ReadAllText(sky);
+        Assert.Equal(export.Schedule.ScheduledIndices.Length, System.Text.RegularExpressions.Regex.Matches(xml, "<precursor ").Count);
+        Assert.Contains("file_name_hint=\"assay.blib\"", xml);
+        Assert.True(File.Exists(Path.Combine(_dir, "doc", "assay.blib")));
+    }
+
     /// <summary>
     /// The app's path: Empirical Load (no Carafe library, no target list)
     /// then "Export Thermo CSV..." on the resulting schedule.

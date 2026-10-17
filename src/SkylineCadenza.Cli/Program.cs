@@ -31,7 +31,7 @@ public static class Program
     ///   SkylineCadenzaCli schedule INPUT.json OUTPUT.json
     ///   SkylineCadenzaCli schedule - -        (stdin / stdout)
     ///   SkylineCadenzaCli schedule-diann REPORT.parquet PARAMS.json OUTPUT.json
-    ///   SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json]
+    ///   SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json] [--skyline OUT.sky] [--skylinecmd PATH]
     ///   SkylineCadenzaCli describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json
     /// </summary>
     public static async Task<int> Main(string[] args)
@@ -170,13 +170,17 @@ public static class Program
     /// </summary>
     internal static async Task<int> RunExportThermoAsync(string[] rest)
     {
-        if (rest.Length is not (3 or 4))
+        if (!TryTakeOptions(rest, out var positional, out var options, "--skyline", "--skylinecmd")
+            || positional.Count is not (3 or 4))
         {
-            Console.Error.WriteLine("usage: SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json]");
+            Console.Error.WriteLine("usage: SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json|- OUTPUT.csv [SUMMARY.json] "
+                + "[--skyline OUTPUT.sky] [--skylinecmd SkylineCmd.exe]");
             return 64;
         }
-        string reportPath = rest[0], paramsPath = rest[1], outputPath = rest[2];
-        string? summaryPath = rest.Length == 4 ? rest[3] : null;
+        string reportPath = positional[0], paramsPath = positional[1], outputPath = positional[2];
+        string? summaryPath = positional.Count == 4 ? positional[3] : null;
+        options.TryGetValue("--skyline", out var skylinePath);
+        options.TryGetValue("--skylinecmd", out var skylineCmd);
         if (!File.Exists(reportPath))
         {
             Console.Error.WriteLine($"error: DIA-NN report not found: {reportPath}");
@@ -207,7 +211,50 @@ public static class Program
         Console.Error.WriteLine(
             $"pool {export.Candidates.Count:n0}  scheduled {r.ScheduledIndices.Length:n0}  proteins {r.ProteinGroupsCovered:n0}  "
             + $"slots {r.Slots.Length:n0}  rows {export.RowCount:n0}  mode {export.Parameters.Mode}  -> {outputPath}");
+
+        if (skylinePath is not null)
+        {
+            try
+            {
+                var document = await SkylineDocumentExport.WriteAsync(export, skylinePath, skylineCmd);
+                Console.Error.WriteLine($"skyline {document.Precursors:n0} precursors  -> {document.Document}");
+            }
+            catch (InvalidOperationException ex)
+            {
+                // The CSV stands; only the document is missing.
+                Console.Error.WriteLine($"error: {ex.Message}");
+                return 3;
+            }
+        }
         return 0;
+    }
+
+    /// <summary>
+    /// Split <paramref name="args"/> into positional arguments and the named
+    /// <paramref name="names"/> (<c>--name value</c> or <c>--name=value</c>).
+    /// False on an unknown option or one without a value.
+    /// </summary>
+    internal static bool TryTakeOptions(
+        IReadOnlyList<string> args, out List<string> positional, out Dictionary<string, string> options, params string[] names)
+    {
+        positional = new List<string>();
+        options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < args.Count; i++)
+        {
+            var arg = args[i];
+            if (!arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                positional.Add(arg);
+                continue;
+            }
+            var eq = arg.IndexOf('=');
+            var name = eq > 0 ? arg[..eq] : arg;
+            if (!names.Contains(name, StringComparer.OrdinalIgnoreCase)) return false;
+            if (eq > 0) options[name] = arg[(eq + 1)..];
+            else if (i + 1 < args.Count) options[name] = args[++i];
+            else return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -385,6 +432,9 @@ public static class Program
         Console.Error.WriteLine("                                     Write the app's Thermo scheduled inclusion CSV.");
         Console.Error.WriteLine("                                     PARAMS '-' = the app's default settings.");
         Console.Error.WriteLine("                                     SUMMARY.json (optional) = what was scheduled.");
+        Console.Error.WriteLine("                                     --skyline OUT.sky = also write the assay as a Skyline");
+        Console.Error.WriteLine("                                     document (with its BLIB), via SkylineCmd");
+        Console.Error.WriteLine("                                     (--skylinecmd PATH, else the newest installed).");
         Console.Error.WriteLine("  describe-diann REPORT.parquet PARAMS.json|- OUTPUT.json");
         Console.Error.WriteLine("                                     List the protein groups and precursors export-thermo");
         Console.Error.WriteLine("                                     would schedule from, by its names.");

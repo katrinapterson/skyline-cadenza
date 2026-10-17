@@ -17,7 +17,7 @@ byte-identical, because they run the same Core code.
 ## Headless: `export-thermo`
 
 ```
-SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json OUTPUT.csv [SUMMARY.json]
+SkylineCadenzaCli export-thermo REPORT.parquet PARAMS.json OUTPUT.csv [SUMMARY.json] [--skyline OUT.sky] [--skylinecmd SkylineCmd.exe]
 SkylineCadenzaCli export-thermo REPORT.parquet - OUTPUT.csv [SUMMARY.json]
 ```
 
@@ -28,6 +28,18 @@ SkylineCadenzaCli export-thermo REPORT.parquet - OUTPUT.csv [SUMMARY.json]
 - `SUMMARY.json` (optional): what was scheduled, for a caller that cannot see
   the plots (`AssayDesignSummary` in Core). Written even when nothing could be
   scheduled, so the caller can see why. Asking for it does not change the CSV.
+- `--skyline OUT.sky` (optional): also write the assay as a Skyline document,
+  for importing the targeted runs (`SkylineDocumentExport` in Core). It is
+  what **Push to Skyline** does to a running document, done to a new one
+  with SkylineCmd: `OUT.blib` beside it as its library, the recommended
+  settings (`SkylineSettingsConfigurator.ArgumentBatches`, so the two cannot
+  drift apart), and `OUT_transitions.csv` imported with
+  `--ignore-transition-errors`. Passengers are left out, as the push leaves
+  them out by default. The scheduling-windows RT filter works without a
+  predictor because every transition-list row carries an explicit retention
+  time and window. `--skylinecmd` names SkylineCmd.exe; without it, the
+  newest installed Skyline or Skyline-daily is used. A 5,208-precursor
+  assay takes about 13 s, ingest included.
 
 The pipeline is the app's **Empirical (DIA-NN report)** Load followed by
 **Export Thermo CSV...**. It reads the report at the q-value cutoff, runs
@@ -52,6 +64,7 @@ in MTM, one per precursor in PRM.
 | 0 | CSV written |
 | 1 | Unexpected failure, for example an unreadable report or bad JSON (`error: <Type>: <message>` on stderr) |
 | 2 | Nothing could be scheduled with these settings; no CSV written |
+| 3 | CSV written, but the Skyline document could not be (`--skyline`) |
 | 64 | Wrong number of arguments |
 | 66 | Report or PARAMS file not found |
 
@@ -198,6 +211,8 @@ recent running Skyline.
 `ThermoCsvWriter` output from the app's Load pipeline, that the summary
 reports target entries (including one that matches nothing) and forced
 peptides without changing the CSV, and that `describe-diann` lists the pool
-with gene names. When the reference
+with gene names. The Skyline document's arguments are checked against the
+push's. When SkylineCmd and the reference report are present, a document
+built from the report is checked to hold every scheduled precursor. When the reference
 Stellar report is on disk, the test repeats that check on it.
 `LaunchOptionsTests` covers argument parsing.
